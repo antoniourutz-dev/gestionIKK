@@ -1,4 +1,4 @@
-name: Compilar GestorPDF para Windows (v2.4 · ENVIAR BIHOTZ)
+name: Compilar GestorPDF para Windows (v2.6.1 · CLAVES POR SERVICIO)
 
 on:
   workflow_dispatch:
@@ -31,9 +31,9 @@ jobs:
 
       - name: Pruebas del motor PDF
         run: |
-          python -m compileall -q app.py pdf_core.py document_routes.py bihotz_email.py
+          python -m compileall -q app.py pdf_core.py document_routes.py bihotz_email.py history_store.py history_window.py archive_security.py
           python -m unittest discover -s tests -v
-          python -c "import app, customtkinter, tkinterdnd2, fitz, document_routes, keyring, bihotz_email, win32com.client"
+          python -c "import app, customtkinter, tkinterdnd2, fitz, document_routes, keyring, bihotz_email, history_store, history_window, archive_security, win32com.client"
 
       - name: Construir ejecutable
         run: >-

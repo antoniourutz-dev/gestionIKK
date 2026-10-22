@@ -1,4 +1,4 @@
-"""Gestor PDF 2.4 · Visor avanzado con circuitos BIHOTZ, LOGO y POLICLINICA.
+"""Gestor PDF 2.6.1 · Visor avanzado con circuitos BIHOTZ, LOGO y POLICLINICA.
 
 Ninguna función reconoce automáticamente pacientes, CIC, nombres ni apellidos.
 """
@@ -12,8 +12,7 @@ import uuid
 import tkinter as tk
 from datetime import datetime
 from pathlib import Path
-from typing import Callable
-from tkinter import filedialog, messagebox, simpledialog
+from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 from PIL import ImageTk
@@ -22,6 +21,12 @@ from tkinterdnd2 import DND_FILES, TkinterDnD
 from pdf_core import Match, PDFDocument, PDFViewerError
 from document_routes import expediente_directory, find_matching_downloads, get_route, original_filename
 from bihotz_email import (archive_stamp, folder_snapshot, prepare_outlook_draft, validate_daily_archive, RECIPIENT)
+from history_store import HistoryStore
+from history_window import HistoryWindow
+from archive_security import (
+    get_service_password, creation_command,
+    test_command, list_command,
+)
 
 
 # Identidad visual (modo claro, diseñado para pantallas de oficina).
@@ -94,6 +99,9 @@ class App(TkinterDnD.Tk):
         self._bihotz_ready_archive: Path | None = None
         self._bihotz_snapshot: tuple[tuple[str, int, int], ...] | None = None
         self._bihotz_archive_stamp: tuple[int, int] | None = None
+        self._history_store: HistoryStore | None = None
+        self._history_window: HistoryWindow | None = None
+        self._history_error_notified = False
 
         self._create_layout()
         self._keyboard_shortcuts()
@@ -144,8 +152,9 @@ class App(TkinterDnD.Tk):
         name_area.grid(row=0, column=1, sticky="w")
         self._label(name_area, "GESTOR DOCUMENTAL", size=19, color=NAVY, bold=True).pack(anchor="w")
         self._label(name_area, "BIHOTZ  /  LOGOPEDIA  /  POLICLINICA", size=11, color=MUTED).pack(anchor="w")
-        self._label(header, "VISOR PDF · v2.4", size=11, color=MUTED, bold=True).grid(row=0, column=2, padx=16)
-        self._button(header, "+ Abrir PDF", self.seleccionar, kind="primary", width=132, height=38).grid(row=0, column=3, padx=(2, 24))
+        self._label(header, "VISOR PDF · v2.6.1", size=11, color=MUTED, bold=True).grid(row=0, column=2, padx=16)
+        self._button(header, "◷  Historial", self.abrir_historial, kind="plain", width=120, height=38).grid(row=0, column=3, padx=(2, 9))
+        self._button(header, "+ Abrir PDF", self.seleccionar, kind="primary", width=132, height=38).grid(row=0, column=4, padx=(2, 24))
 
         main = ctk.CTkFrame(self, fg_color="transparent")
         main.grid(row=1, column=0, sticky="nsew", padx=18, pady=(16, 12))
@@ -352,19 +361,23 @@ class App(TkinterDnD.Tk):
         self._label(self.frame_logo, "LOGOPEDIA · CENTRO", size=10, color=NAVY, bold=True).pack(anchor="w", padx=9, pady=(7, 4))
         logo_actions = ctk.CTkFrame(self.frame_logo, fg_color="transparent")
         logo_actions.pack(fill="x", padx=8, pady=(0, 8))
-        for value in ("MATIA", "ARANSGI"):
+        center_choice = ctk.CTkFrame(logo_actions, fg_color="transparent")
+        center_choice.pack(side="left", fill="x", expand=True)
+        # Dos filas compactas para que el panel NO necesite scroll y quepa ASPACE.
+        for index, value in enumerate(("MATIA", "ARANSGI", "ASPACE")):
             ctk.CTkRadioButton(
-                logo_actions, text=value, variable=self.centro_logo_var, value=value,
+                center_choice, text=value, variable=self.centro_logo_var, value=value,
                 radiobutton_width=15, radiobutton_height=15, fg_color=BLUE,
                 text_color=NAVY, font=ctk.CTkFont(size=11),
-            ).pack(side="left", padx=(0, 10))
-        self._button(logo_actions, "Comprimir", self.comprimir_logopedia, kind="soft", width=87, height=30).pack(side="right")
+                width=88,
+            ).grid(row=index // 2, column=index % 2, sticky="w", pady=2, padx=(0, 3))
+        self._button(logo_actions, "Comprimir", self.comprimir_logopedia, kind="soft", width=87, height=30).pack(side="right", padx=(4, 0))
 
         self.frame_poli = ctk.CTkFrame(form, fg_color="#F7F9FD", corner_radius=10)
         self._label(self.frame_poli, "POLICLINICA · DOCUMENTO FIRMADO", size=10, color=NAVY, bold=True).pack(anchor="w", padx=9, pady=(7, 4))
         poli_actions = ctk.CTkFrame(self.frame_poli, fg_color="transparent")
         poli_actions.pack(fill="x", padx=8, pady=(0, 8))
-        self._button(poli_actions, "Configurar clave", self.configurar_clave_poli, kind="plain", width=125, height=30).pack(side="left")
+        self._label(poli_actions, "Clave del servicio asignada", size=10).pack(side="left")
         self._button(poli_actions, "Comprimir", self.comprimir_policlinica, kind="soft", width=92, height=30).pack(side="right")
 
         self.form_note = self._label(form, "Vista previa en modo lectura · PDF sin modificar", size=10, color=MUTED)
@@ -391,6 +404,7 @@ class App(TkinterDnD.Tk):
     def _keyboard_shortcuts(self) -> None:
         self.bind_all("<Control-o>", lambda _e: self.seleccionar())
         self.bind_all("<Control-f>", lambda _e: self.search_entry.focus_set())
+        self.bind_all("<Control-h>", lambda _e: self.abrir_historial())
         self.bind_all("<Control-MouseWheel>", self.hacer_zoom)
         self.bind_all("<Control-plus>", lambda _e: self.zoom_mas())
         self.bind_all("<Control-minus>", lambda _e: self.zoom_menos())
@@ -802,6 +816,37 @@ class App(TkinterDnD.Tk):
     def _status(self, text: str) -> None:
         self.status_var.set(text)
 
+    def _get_history_store(self) -> HistoryStore:
+        if self._history_store is None:
+            self._history_store = HistoryStore()
+        return self._history_store
+
+    def _record_history(self, action: str, folder: Path, file: Path | None = None, *, kind: str | None = None) -> None:
+        """Registrar solo operaciones concluidas. Un fallo del historial no revierte una copia válida."""
+        try:
+            self._get_history_store().add(kind or self.tipo.get(), action, folder, file)
+        except Exception as exc:
+            # El error se comunica una vez, pero nunca registra el documento ni la clave en logs.
+            if not self._history_error_notified:
+                self._history_error_notified = True
+                messagebox.showwarning(
+                    "Historial no disponible",
+                    "La operación documental se ha realizado, pero no ha podido anotarse en el historial local. "
+                    f"Revisa permisos y espacio disponible.\n\nDetalle técnico: {type(exc).__name__}",
+                )
+
+    def abrir_historial(self) -> None:
+        try:
+            if self._history_window is not None and self._history_window.winfo_exists():
+                self._history_window.lift()
+                self._history_window.focus_force()
+                self._history_window.refresh()
+            else:
+                self._history_window = HistoryWindow(self, self._get_history_store(), BASE_ROOT)
+                self._history_window.focus_force()
+        except Exception as exc:
+            messagebox.showerror("Historial", f"No se ha podido abrir el historial: {exc}")
+
     def _expediente_dir(self) -> Path:
         # Mismo formato en los tres circuitos y destinos: APELLIDOS, NOMBRE.
         return expediente_directory(
@@ -848,6 +893,7 @@ class App(TkinterDnD.Tk):
             self._saved_context = self._current_context()
             self.btn_abrir.configure(state="normal")
             self.btn_firmado.configure(state="normal")
+            self._record_history("Documento guardado", folder, target)
             self._status(f"Documento guardado correctamente · {target.name}")
             messagebox.showinfo("Documento guardado", f"El documento se ha guardado en:\n{target}")
         except OSError as exc:
@@ -890,10 +936,12 @@ class App(TkinterDnD.Tk):
                 target = self.carpeta_generada / path.name
                 if not self._copy_with_confirmation(path, target):
                     continue
+                self._record_history("Firmado incorporado", self.carpeta_generada, target)
                 if get_route(self.tipo.get()).copies_to_day:
                     day_target = self._day_dir() / path.name
                     if not self._copy_with_confirmation(path, day_target):
                         continue
+                    self._record_history("Firmado al día", day_target.parent, day_target)
                     self._invalidate_bihotz_archive()
                 self.archivo_firmado_path = target
                 successes += 1
@@ -913,7 +961,12 @@ class App(TkinterDnD.Tk):
                 return
             if not messagebox.askyesno("Confirmar volantes", "Archivos encontrados:\n\n" + "\n".join(f.name for f in files) + "\n\n¿Guardarlos en Volantes?"):
                 return
-            successes = sum(1 for path in files if self._copy_with_confirmation(path, VOLANTES_ROOT / path.name))
+            successes = 0
+            for path in files:
+                target = VOLANTES_ROOT / path.name
+                if self._copy_with_confirmation(path, target):
+                    successes += 1
+                    self._record_history("Volante archivado", VOLANTES_ROOT, target)
             self._status(f"Volantes copiados: {successes}")
             messagebox.showinfo("Volantes", f"Se han guardado {successes} documento(s).")
         except OSError as exc:
@@ -923,6 +976,7 @@ class App(TkinterDnD.Tk):
         try:
             path = self._day_dir()
             path.mkdir(parents=True, exist_ok=True)
+            self._record_history("Carpeta diaria preparada", path, kind="BIHOTZ")
             self._status(f"Carpeta del día disponible: {path.name}")
             os.startfile(str(path))
         except OSError as exc:
@@ -948,59 +1002,59 @@ class App(TkinterDnD.Tk):
         self._bihotz_archive_stamp = None
         self.btn_enviar_bihotz.configure(state="disabled")
 
-    def _compress(self, source: Path, archive: Path, title: str,
-                  password_provider: Callable[[], str | None] | None = None,
+    def _compress(self, source: Path, archive: Path, service: str,
                   *, replace_archive: bool = False) -> bool:
         exe = self._find_7zip()
         if not exe:
             messagebox.showerror("7-Zip no disponible", "No se encuentra 7-Zip instalado en este equipo.")
             return False
-        # Nunca guardar contraseñas en GitHub, el ejecutable ni el registro de errores.
-        password = (password_provider() if password_provider else simpledialog.askstring(
-            "Contraseña del archivo", f"Introduce la contraseña autorizada para {title}:", show="*", parent=self,
-        ))
-        if password is None:
-            return False
-        if not password:
-            messagebox.showwarning("Falta la contraseña", "No se ha creado el archivo comprimido.")
+        try:
+            password = get_service_password(service)
+        except ValueError as exc:
+            messagebox.showerror("Servicio no reconocido", str(exc))
             return False
         if archive.exists() and not messagebox.askyesno(
             "El comprimido ya existe", f"¿Quieres reemplazar el archivo existente?\n{archive.name}",
         ):
             return False
-        # Para el día BIHOTZ generar un 7z nuevo en la misma unidad evita conservar
-        # archivos antiguos que 7-Zip 'a' dejaría dentro del comprimido previo.
-        temporary = archive.with_name(f".{archive.stem}-{uuid.uuid4().hex}.7z") if replace_archive else None
-        output = temporary or archive
+        # Siempre construir un comprimido NUEVO (no añadir a uno anterior) y
+        # sustituirlo solo si se verifican sus contenidos y su lista de archivos.
+        temporary = archive.with_name(f".{archive.stem}-{uuid.uuid4().hex}.7z")
         try:
             result = subprocess.run(
-                [str(exe), "a", "-t7z", f"-p{password}", "-mhe=on", str(output), str(source)],
+                creation_command(exe, temporary, source, password),
                 capture_output=True, text=True, timeout=180,
             )
             if result.returncode != 0:
-                raise RuntimeError("La compresión no terminó correctamente. Comprueba el archivo y la ruta de destino.")
-            if temporary is not None:
-                # No sustituir un comprimido válido por otro incompleto o corrupto.
-                archive_stamp(temporary)
-                integrity = subprocess.run(
-                    [str(exe), "t", f"-p{password}", str(temporary)],
-                    capture_output=True, text=True, timeout=180,
-                )
-                if integrity.returncode != 0:
-                    raise RuntimeError("7-Zip no ha podido verificar el archivo nuevo; se conserva el comprimido anterior.")
-                os.replace(temporary, archive)
+                raise RuntimeError("La compresión no terminó correctamente. Comprueba archivo y unidad de destino.")
+            archive_stamp(temporary)
+            integrity = subprocess.run(
+                test_command(exe, temporary, password),
+                capture_output=True, text=True, timeout=180,
+            )
+            if integrity.returncode != 0:
+                raise RuntimeError("7-Zip no ha podido verificar el archivo. Se conserva el anterior.")
+            listing = subprocess.run(
+                list_command(exe, temporary),
+                capture_output=True, text=True, timeout=180,
+            )
+            if listing.returncode != 0:
+                raise RuntimeError("La lista de archivos no es visible sin clave; se conserva el anterior.")
+            os.replace(temporary, archive)
             self._status(f"Archivo comprimido: {archive.name}")
-            messagebox.showinfo("Compresión completada", f"Se ha creado el archivo:\n{archive}")
+            messagebox.showinfo("Compresión completada", "Se ha creado el archivo cifrado:\n"
+                                f"{archive}\n\nLa lista de documentos es visible sin clave."
+                                "\nPara abrirlos o extraerlos se necesitará contraseña.")
             return True
         except (OSError, subprocess.TimeoutExpired, RuntimeError, ValueError) as exc:
+            # No incorporar el proceso ni sus argumentos a mensajes: contienen la contraseña.
             messagebox.showerror("Compresión", str(exc))
             return False
         finally:
-            if temporary is not None:
-                try:
-                    temporary.unlink(missing_ok=True)
-                except OSError:
-                    pass
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def comprimir_dia(self) -> None:
         self._invalidate_bihotz_archive()
@@ -1016,6 +1070,7 @@ class App(TkinterDnD.Tk):
         archive = path.with_suffix(".7z")
         if not self._compress(path, archive, "BIHOTZ", replace_archive=True):
             return
+        self._record_history("Día comprimido", archive.parent, archive, kind="BIHOTZ")
         try:
             # Rechazar el envío si se añadieron archivos mientras se comprimía.
             after = folder_snapshot(path)
@@ -1055,6 +1110,8 @@ class App(TkinterDnD.Tk):
             ):
                 return
             prepare_outlook_draft(archive, today)
+            # Un borrador preparado NO equivale a un correo enviado.
+            self._record_history("Borrador preparado (no enviado)", archive.parent, archive, kind="BIHOTZ")
             self._status("Borrador BIHOTZ preparado en Outlook · Pendiente de enviar manualmente")
             messagebox.showinfo(
                 "Correo preparado",
@@ -1073,46 +1130,9 @@ class App(TkinterDnD.Tk):
         if not self.archivo_firmado_path or not self.archivo_firmado_path.is_file():
             messagebox.showwarning("Comprimir LOGOPEDIA", "Primero incorpora el archivo firmado desde Descargas.")
             return
-        self._compress(self.archivo_firmado_path, self.archivo_firmado_path.with_suffix(".7z"), self.centro_logo_var.get())
-
-    @staticmethod
-    def _keyring():
-        """En Windows, keyring utiliza el almacén de credenciales del usuario."""
-        try:
-            import keyring
-            return keyring
-        except ImportError:
-            return None
-
-    def _poli_password(self, *, force_prompt: bool = False) -> str | None:
-        keyring = self._keyring()
-        service, account = "GestorPDF", "POLICLINICA"
-        if keyring is not None and not force_prompt:
-            try:
-                saved = keyring.get_password(service, account)
-                if saved:
-                    return saved
-            except Exception:
-                # Un fallo de Credential Manager no impide comprimir manualmente.
-                pass
-        password = simpledialog.askstring(
-            "Clave de POLICLINICA",
-            "Introduce la clave autorizada para comprimir documentos de POLICLINICA:",
-            show="*", parent=self,
-        )
-        if not password:
-            return None
-        if keyring is not None:
-            try:
-                keyring.set_password(service, account, password)
-                self._status("Clave de POLICLINICA guardada en las credenciales de Windows")
-            except Exception:
-                messagebox.showwarning("Clave no recordada", "No se ha podido guardar la clave en Windows. Se usará solo en esta operación.")
-        return password
-
-    def configurar_clave_poli(self) -> None:
-        if self._poli_password(force_prompt=True):
-            messagebox.showinfo("POLICLINICA", "Configuración de clave completada. No se ha incluido ninguna contraseña en el programa.")
+        archive = self.archivo_firmado_path.with_suffix(".7z")
+        if self._compress(self.archivo_firmado_path, archive, self.centro_logo_var.get()):
+            self._record_history("Firmado comprimido", archive.parent, archive, kind="LOGO")
 
     def comprimir_policlinica(self) -> None:
         if not self._folder_belongs_to_current_document():
@@ -1120,12 +1140,13 @@ class App(TkinterDnD.Tk):
         if not self.archivo_firmado_path or not self.archivo_firmado_path.is_file():
             messagebox.showwarning("Comprimir POLICLINICA", "Primero incorpora el archivo firmado desde Descargas.")
             return
-        self._compress(
+        archive = self.archivo_firmado_path.with_suffix(".7z")
+        if self._compress(
             self.archivo_firmado_path,
-            self.archivo_firmado_path.with_suffix(".7z"),
+            archive,
             "POLICLINICA",
-            password_provider=self._poli_password,
-        )
+        ):
+            self._record_history("Firmado comprimido", archive.parent, archive, kind="POLICLINICA")
 
     def _close(self) -> None:
         self._search_token += 1
