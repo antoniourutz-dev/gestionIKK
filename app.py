@@ -1,4 +1,4 @@
-"""Gestor PDF 2.0 · Interfaz renovada + visor de documentos multipágina.
+"""Gestor PDF 2.1 · Visor central de arrastrar y soltar, miniaturas opcionales.
 
 Ninguna función reconoce automáticamente pacientes, CIC, nombres ni apellidos.
 """
@@ -47,7 +47,10 @@ class App(TkinterDnD.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("Gestor documental | BIHOTZ · LOGOPEDIA")
-        self.geometry("1440x875")
+        # Ajustar tamaño inicial a la pantalla sin introducir scroll en el panel lateral.
+        width = min(1440, max(1090, self.winfo_screenwidth() - 80))
+        height = min(875, max(690, self.winfo_screenheight() - 90))
+        self.geometry(f"{width}x{height}")
         self.minsize(1090, 690)
         self.configure(bg=BG)
 
@@ -57,6 +60,7 @@ class App(TkinterDnD.Tk):
         self.zoom = 1.0
         self.fit_mode = "page"
         self.thumb_batch = 0
+        self._thumbnails_visible = False
         self._canvas_photo: ImageTk.PhotoImage | None = None
         self._thumb_photos: list[ImageTk.PhotoImage] = []
         self._resize_task: str | None = None
@@ -131,7 +135,7 @@ class App(TkinterDnD.Tk):
         name_area.grid(row=0, column=1, sticky="w")
         self._label(name_area, "GESTOR DOCUMENTAL", size=19, color=NAVY, bold=True).pack(anchor="w")
         self._label(name_area, "BIHOTZ  /  LOGOPEDIA", size=11, color=MUTED).pack(anchor="w")
-        self._label(header, "VISOR PDF · v2.0", size=11, color=MUTED, bold=True).grid(row=0, column=2, padx=16)
+        self._label(header, "VISOR PDF · v2.1", size=11, color=MUTED, bold=True).grid(row=0, column=2, padx=16)
         self._button(header, "+ Abrir PDF", self.seleccionar, kind="primary", width=132, height=38).grid(row=0, column=3, padx=(2, 24))
 
         main = ctk.CTkFrame(self, fg_color="transparent")
@@ -162,10 +166,15 @@ class App(TkinterDnD.Tk):
         card.grid_rowconfigure(3, weight=1)
 
         headline = ctk.CTkFrame(card, fg_color="transparent")
-        headline.grid(row=0, column=0, sticky="ew", padx=18, pady=(15, 7))
+        headline.grid(row=0, column=0, sticky="ew", padx=18, pady=(13, 6))
         headline.grid_columnconfigure(0, weight=1)
         self._label(headline, "Vista del documento", size=15, color=NAVY, bold=True).grid(row=0, column=0, sticky="w")
-        self._label(headline, "PDF original · Solo lectura", size=10, color=MUTED).grid(row=0, column=1, sticky="e")
+        self.btn_thumbs = self._button(
+            headline, "▦  Ver miniaturas", self._toggle_thumbnails, width=120, height=29, kind="soft",
+        )
+        self.btn_thumbs.grid(row=0, column=1, padx=(4, 15))
+        self.btn_thumbs.grid_remove()  # Sin sentido para PDFs de una página.
+        self._label(headline, "PDF original · Solo lectura", size=10, color=MUTED).grid(row=0, column=2, sticky="e")
 
         toolbar = ctk.CTkFrame(card, fg_color="transparent")
         toolbar.grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 7))
@@ -191,38 +200,19 @@ class App(TkinterDnD.Tk):
             searchbar, textvariable=self.search_var, placeholder_text="Buscar texto dentro del documento...",
             fg_color=WHITE, border_color=BORDER, corner_radius=8, height=33,
         )
-        self.search_entry.grid(row=0, column=0, sticky="ew", padx=(9, 5), pady=8)
+        self.search_entry.grid(row=0, column=0, sticky="ew", padx=(9, 5), pady=6)
         self.search_entry.bind("<Return>", lambda e: self.buscar_texto())
         self._button(searchbar, "Buscar", self.buscar_texto, width=57, kind="primary", height=32).grid(row=0, column=1, padx=2)
         self._button(searchbar, "‹", self.resultado_anterior, width=29, kind="plain", height=32).grid(row=0, column=2, padx=2)
         self._button(searchbar, "›", self.resultado_siguiente, width=29, kind="plain", height=32).grid(row=0, column=3, padx=(2, 8))
 
-        body = ctk.CTkFrame(card, fg_color="transparent")
-        body.grid(row=3, column=0, sticky="nsew", padx=12)
-        body.grid_columnconfigure(1, weight=1)
-        body.grid_rowconfigure(0, weight=1)
-
-        thumbs = ctk.CTkFrame(body, fg_color="#F7F9FD", width=155, corner_radius=9)
-        thumbs.grid(row=0, column=0, sticky="nsw", padx=(0, 8))
-        thumbs.grid_propagate(False)
-        thumbs.grid_rowconfigure(1, weight=1)
-        thumb_header = ctk.CTkFrame(thumbs, fg_color="transparent")
-        thumb_header.grid(row=0, column=0, sticky="ew", padx=8, pady=8)
-        self._label(thumb_header, "PÁGINAS", size=10, color=MUTED, bold=True).pack(side="left")
-        self.thumb_scroll = ctk.CTkScrollableFrame(thumbs, fg_color="transparent", width=135)
-        self.thumb_scroll.grid(row=1, column=0, sticky="nsew", padx=4)
-        thumb_controls = ctk.CTkFrame(thumbs, fg_color="transparent")
-        thumb_controls.grid(row=2, column=0, padx=4, pady=(6, 9), sticky="ew")
-        self._button(thumb_controls, "‹", self.prev_thumb_batch, width=30, height=28, kind="plain").pack(side="left")
-        self.thumb_batch_label = self._label(thumb_controls, "0 / 0", size=10, color=MUTED)
-        self.thumb_batch_label.pack(side="left", expand=True)
-        self._button(thumb_controls, "›", self.next_thumb_batch, width=30, height=28, kind="plain").pack(side="right")
-
-        canvas_wrap = ctk.CTkFrame(body, fg_color=CANVAS_BG, corner_radius=9)
-        canvas_wrap.grid(row=0, column=1, sticky="nsew")
+        # Toda la anchura del visor queda destinada al documento.
+        # El canvas también recibe el PDF arrastrado, esté vacío o abierto.
+        canvas_wrap = ctk.CTkFrame(card, fg_color=CANVAS_BG, corner_radius=9)
+        canvas_wrap.grid(row=3, column=0, sticky="nsew", padx=13)
         canvas_wrap.grid_columnconfigure(0, weight=1)
         canvas_wrap.grid_rowconfigure(0, weight=1)
-        self.canvas = tk.Canvas(canvas_wrap, bg=CANVAS_BG, borderwidth=0, highlightthickness=0)
+        self.canvas = tk.Canvas(canvas_wrap, bg=CANVAS_BG, borderwidth=0, highlightthickness=0, cursor="arrow")
         self.canvas.grid(row=0, column=0, sticky="nsew", padx=(2, 0), pady=(2, 0))
         self.v_scroll = ctk.CTkScrollbar(canvas_wrap, orientation="vertical", command=self.canvas.yview, width=12)
         self.v_scroll.grid(row=0, column=1, sticky="ns", pady=(2, 12))
@@ -236,108 +226,140 @@ class App(TkinterDnD.Tk):
         self.canvas.bind("<Button-5>", lambda e: self.canvas.yview_scroll(3, "units"))
         self.canvas.bind("<ButtonPress-2>", lambda e: self.canvas.scan_mark(e.x, e.y))
         self.canvas.bind("<B2-Motion>", lambda e: self.canvas.scan_dragto(e.x, e.y, gain=1))
+        self.canvas.bind("<Button-1>", self._on_viewer_click)
+        for target in (canvas_wrap, self.canvas):
+            target.drop_target_register(DND_FILES)
+            target.dnd_bind("<<Drop>>", self.al_soltar)
+            target.dnd_bind("<<DragEnter>>", self._drag_enter)
+            target.dnd_bind("<<DragLeave>>", self._drag_leave)
 
-        viewer_footer = ctk.CTkFrame(card, fg_color="transparent", height=38)
-        viewer_footer.grid(row=4, column=0, sticky="ew", padx=16, pady=(6, 5))
+        # Tira horizontal opcional: nunca ocupa espacio al abrir un PDF de una página.
+        self.thumb_ribbon = ctk.CTkFrame(card, fg_color="#F7F9FD", corner_radius=9)
+        self.thumb_ribbon.grid(row=4, column=0, sticky="ew", padx=13, pady=(8, 0))
+        self.thumb_ribbon.grid_columnconfigure(0, weight=1)
+        self.thumb_ribbon.grid_remove()
+        ribbon_header = ctk.CTkFrame(self.thumb_ribbon, fg_color="transparent")
+        ribbon_header.grid(row=0, column=0, sticky="ew", padx=11, pady=(5, 0))
+        self._label(ribbon_header, "MINIATURAS", size=10, color=MUTED, bold=True).pack(side="left")
+        self._button(ribbon_header, "›", self.next_thumb_batch, width=26, height=24, kind="plain").pack(side="right", padx=(2, 0))
+        self.thumb_batch_label = self._label(ribbon_header, "0 / 0", size=10, color=MUTED)
+        self.thumb_batch_label.pack(side="right", padx=9)
+        self._button(ribbon_header, "‹", self.prev_thumb_batch, width=26, height=24, kind="plain").pack(side="right", padx=(0, 2))
+        self.thumb_scroll = ctk.CTkScrollableFrame(
+            self.thumb_ribbon, fg_color="transparent", height=126, orientation="horizontal",
+        )
+        self.thumb_scroll.grid(row=1, column=0, sticky="ew", padx=7, pady=(0, 5))
+
+        viewer_footer = ctk.CTkFrame(card, fg_color="transparent", height=32)
+        viewer_footer.grid(row=5, column=0, sticky="ew", padx=16, pady=(4, 4))
         viewer_footer.grid_columnconfigure(0, weight=1)
         self._label(viewer_footer, "", size=11, color=MUTED, textvariable=self.doc_info_var).grid(row=0, column=0, sticky="w")
         self._label(viewer_footer, "", size=11, color=MUTED, textvariable=self.search_result_var).grid(row=0, column=1, sticky="e")
 
     def _create_form(self, parent) -> None:
+        # Panel fijo, sin CTkScrollableFrame y sin barra de desplazamiento vertical.
         card = ctk.CTkFrame(parent, fg_color=WHITE, corner_radius=14, border_width=1, border_color=BORDER, width=360)
         card.grid(row=0, column=1, sticky="nsew")
         card.grid_propagate(False)
-        card.grid_rowconfigure(0, weight=1)
         card.grid_columnconfigure(0, weight=1)
-        form = ctk.CTkScrollableFrame(card, fg_color=WHITE, corner_radius=14, width=320)
-        form.grid(row=0, column=0, sticky="nsew", padx=2, pady=2)
+        card.grid_rowconfigure(0, weight=1)
+        form = ctk.CTkFrame(card, fg_color="transparent")
+        form.grid(row=0, column=0, sticky="nsew", padx=13, pady=(9, 8))
+        form.grid_columnconfigure(0, weight=1)
 
-        self._label(form, "Datos del expediente", size=17, color=NAVY, bold=True).pack(anchor="w", padx=16, pady=(18, 0))
-        self._label(form, "Introduce los datos manualmente", size=11, color=MUTED).pack(anchor="w", padx=16, pady=(1, 13))
+        self._label(form, "Datos del expediente", size=17, color=NAVY, bold=True).pack(anchor="w", padx=4, pady=(3, 0))
+        self._label(form, "Cumplimenta los datos manualmente", size=10, color=MUTED).pack(anchor="w", padx=4, pady=(0, 8))
 
-        self.drop_frame = ctk.CTkFrame(form, fg_color=BLUE_PALE, border_width=1, border_color="#C4D8FA", corner_radius=12, height=96)
-        self.drop_frame.pack(fill="x", padx=16, pady=(0, 11))
-        self.drop_frame.pack_propagate(False)
-        self.drop_label = self._label(self.drop_frame, "↓   ARRASTRA AQUÍ UN PDF", color=BLUE, size=12, bold=True)
-        self.drop_label.pack(pady=(15, 0))
-        self._label(self.drop_frame, "o haz clic para seleccionar un archivo", color=MUTED, size=10).pack(pady=(3, 0))
-        self.drop_frame.drop_target_register(DND_FILES)
-        self.drop_frame.dnd_bind("<<Drop>>", self.al_soltar)
-        self.drop_frame.bind("<Button-1>", lambda e: self.seleccionar())
-        for child in self.drop_frame.winfo_children():
-            child.bind("<Button-1>", lambda e: self.seleccionar())
-            try:
-                child.drop_target_register(DND_FILES)
-                child.dnd_bind("<<Drop>>", self.al_soltar)
-            except Exception:
-                pass
-        self.path_label = self._label(form, "Ningún archivo seleccionado", size=10, color=MUTED, wraplength=295)
-        self.path_label.pack(anchor="w", padx=17, pady=(0, 10))
+        file_strip = ctk.CTkFrame(form, fg_color=BLUE_PALE, corner_radius=8, height=32)
+        file_strip.pack(fill="x", padx=2, pady=(0, 9))
+        file_strip.pack_propagate(False)
+        self.path_label = self._label(file_strip, "PDF · Ningún documento abierto", size=11, color=BLUE)
+        self.path_label.pack(side="left", padx=10, pady=5)
 
-        for text, var in [("NOMBRE", self.nom), ("APELLIDOS", self.ape), ("CIC", self.cic)]:
-            self._label(form, text, size=10, color=MUTED, bold=True).pack(anchor="w", padx=16, pady=(9, 3))
+        # Dos columnas para evitar que los datos personales obliguen a desplazar el panel.
+        fields = ctk.CTkFrame(form, fg_color="transparent")
+        fields.pack(fill="x", padx=2)
+        fields.grid_columnconfigure((0, 1), weight=1, uniform="person")
+        for index, (text, var) in enumerate((("NOMBRE", self.nom), ("APELLIDOS", self.ape))):
+            field = ctk.CTkFrame(fields, fg_color="transparent")
+            field.grid(row=0, column=index, sticky="ew", padx=(0, 5) if index == 0 else (5, 0))
+            self._label(field, text, size=10, color=MUTED, bold=True).pack(anchor="w", pady=(0, 2))
             ctk.CTkEntry(
-                form, textvariable=var, height=36, corner_radius=8,
-                fg_color="#FAFBFF", border_color=BORDER, font=ctk.CTkFont(size=12),
-            ).pack(fill="x", padx=16)
+                field, textvariable=var, height=33, corner_radius=8, fg_color="#FAFBFF",
+                border_color=BORDER, font=ctk.CTkFont(size=12),
+            ).pack(fill="x")
+        self._label(form, "CIC", size=10, color=MUTED, bold=True).pack(anchor="w", padx=2, pady=(8, 2))
+        ctk.CTkEntry(
+            form, textvariable=self.cic, height=33, corner_radius=8,
+            fg_color="#FAFBFF", border_color=BORDER, font=ctk.CTkFont(size=12),
+        ).pack(fill="x", padx=2)
 
-        self._section(form, "TIPO DOCUMENTAL")
+        # Preferencias compactas, con la misma lógica de negocio que la versión anterior.
+        self._label(form, "TIPO DOCUMENTAL", size=10, color=NAVY, bold=True).pack(anchor="w", padx=2, pady=(11, 4))
         ctk.CTkSegmentedButton(
             form, values=["BIHOTZ", "LOGO"], variable=self.tipo,
             command=lambda _value: self.actualizar_paneles(),
-            height=34, corner_radius=8, selected_color=BLUE, selected_hover_color=BLUE_HOVER,
+            height=31, corner_radius=8, selected_color=BLUE, selected_hover_color=BLUE_HOVER,
             unselected_color="#EAF0F8", unselected_hover_color="#DFE9F5",
             text_color=NAVY, text_color_disabled=MUTED,
-        ).pack(fill="x", padx=16, pady=(6, 0))
+        ).pack(fill="x", padx=2)
 
-        self._section(form, "GUARDAR EN")
+        self._label(form, "GUARDAR EN", size=10, color=NAVY, bold=True).pack(anchor="w", padx=2, pady=(11, 3))
         dest_frame = ctk.CTkFrame(form, fg_color="transparent")
-        dest_frame.pack(fill="x", padx=16)
-        for label, value in [("Unidad T: (carpeta del servicio)", "T_DRIVE"), ("Escritorio", "ESCRITORIO")]:
+        dest_frame.pack(fill="x", padx=2)
+        for label, value in [("Unidad T:", "T_DRIVE"), ("Escritorio", "ESCRITORIO")]:
             ctk.CTkRadioButton(
-                dest_frame, text=label, variable=self.destino_var, value=value, radiobutton_width=17,
-                radiobutton_height=17, border_color="#9DB0CA", fg_color=BLUE, hover_color=BLUE_HOVER,
-                font=ctk.CTkFont(size=12), text_color=NAVY,
-            ).pack(anchor="w", pady=4)
+                dest_frame, text=label, variable=self.destino_var, value=value,
+                radiobutton_width=16, radiobutton_height=16,
+                border_color="#9DB0CA", fg_color=BLUE, hover_color=BLUE_HOVER,
+                font=ctk.CTkFont(size=11), text_color=NAVY,
+            ).pack(side="left", expand=True, anchor="w", pady=(0, 2))
 
-        self._section(form, "ACCIONES DOCUMENTALES")
-        self.btn_generar = self._button(form, "GUARDAR DOCUMENTO", self.generar, kind="primary", height=42)
-        self.btn_generar.pack(fill="x", padx=16, pady=(7, 8))
+        self._label(form, "ACCIONES DOCUMENTALES", size=10, color=NAVY, bold=True).pack(anchor="w", padx=2, pady=(11, 4))
+        self.btn_generar = self._button(form, "GUARDAR DOCUMENTO", self.generar, kind="primary", height=39)
+        self.btn_generar.pack(fill="x", padx=2, pady=(0, 6))
         common = ctk.CTkFrame(form, fg_color="transparent")
-        common.pack(fill="x", padx=16)
-        common.grid_columnconfigure(0, weight=1)
-        common.grid_columnconfigure(1, weight=1)
-        self.btn_abrir = self._button(common, "Abrir carpeta", self.abrir_carpeta, kind="plain", width=112, state="disabled")
-        self.btn_abrir.grid(row=0, column=0, sticky="ew", padx=(0, 4))
-        self.btn_firmado = self._button(common, "Firmado", self.firmado_descargas, kind="soft", width=112, state="disabled")
-        self.btn_firmado.grid(row=0, column=1, sticky="ew", padx=(4, 0))
-        self.btn_volantes = self._button(form, "Guardar volantes", self.guardar_volantes, kind="plain", height=36)
-        self.btn_volantes.pack(fill="x", padx=16, pady=(8, 2))
+        common.pack(fill="x", padx=2)
+        common.grid_columnconfigure((0, 1, 2), weight=1, uniform="actions")
+        self.btn_abrir = self._button(common, "Carpeta", self.abrir_carpeta, kind="plain", width=80, state="disabled", height=31)
+        self.btn_abrir.grid(row=0, column=0, sticky="ew", padx=(0, 3))
+        self.btn_firmado = self._button(common, "Firmado", self.firmado_descargas, kind="soft", width=80, state="disabled", height=31)
+        self.btn_firmado.grid(row=0, column=1, sticky="ew", padx=3)
+        self.btn_volantes = self._button(common, "Volantes", self.guardar_volantes, kind="plain", width=80, height=31)
+        self.btn_volantes.grid(row=0, column=2, sticky="ew", padx=(3, 0))
 
         self.frame_bihotz = ctk.CTkFrame(form, fg_color="#F7F9FD", corner_radius=10)
-        self._label(self.frame_bihotz, "GESTIÓN DIARIA · BIHOTZ", size=11, bold=True, color=NAVY).pack(anchor="w", padx=11, pady=(10, 5))
-        self._button(self.frame_bihotz, "Crear carpeta del día", self.crear_carpeta_dia, kind="plain").pack(fill="x", padx=10, pady=3)
-        self._button(self.frame_bihotz, "Abrir carpeta del día", self.abrir_carpeta_dia, kind="plain").pack(fill="x", padx=10, pady=3)
-        self._button(self.frame_bihotz, "Comprimir día · 7z", self.comprimir_dia, kind="soft").pack(fill="x", padx=10, pady=(3, 10))
+        self._label(self.frame_bihotz, "GESTIÓN DIARIA · BIHOTZ", size=10, bold=True, color=NAVY).pack(anchor="w", padx=9, pady=(7, 4))
+        day_actions = ctk.CTkFrame(self.frame_bihotz, fg_color="transparent")
+        day_actions.pack(fill="x", padx=8, pady=(0, 8))
+        day_actions.grid_columnconfigure((0, 1, 2), weight=1, uniform="days")
+        self._button(day_actions, "Crear día", self.crear_carpeta_dia, kind="plain", width=74, height=30).grid(row=0, column=0, sticky="ew", padx=(0, 3))
+        self._button(day_actions, "Abrir día", self.abrir_carpeta_dia, kind="plain", width=74, height=30).grid(row=0, column=1, sticky="ew", padx=3)
+        self._button(day_actions, "Comprimir", self.comprimir_dia, kind="soft", width=74, height=30).grid(row=0, column=2, sticky="ew", padx=(3, 0))
 
         self.frame_logo = ctk.CTkFrame(form, fg_color="#F7F9FD", corner_radius=10)
-        self._label(self.frame_logo, "LOGOPEDIA · CENTRO", size=11, color=NAVY, bold=True).pack(anchor="w", padx=11, pady=(10, 5))
-        for value, label in [("MATIA", "MATIA"), ("ARANSGI", "ARANSGI")]:
+        self._label(self.frame_logo, "LOGOPEDIA · CENTRO", size=10, color=NAVY, bold=True).pack(anchor="w", padx=9, pady=(7, 4))
+        logo_actions = ctk.CTkFrame(self.frame_logo, fg_color="transparent")
+        logo_actions.pack(fill="x", padx=8, pady=(0, 8))
+        for value in ("MATIA", "ARANSGI"):
             ctk.CTkRadioButton(
-                self.frame_logo, text=label, variable=self.centro_logo_var, value=value,
-                radiobutton_width=16, radiobutton_height=16, fg_color=BLUE, text_color=NAVY,
-            ).pack(anchor="w", padx=12, pady=4)
-        self._button(self.frame_logo, "Comprimir firmado · 7z", self.comprimir_logopedia, kind="soft").pack(fill="x", padx=10, pady=(8, 10))
+                logo_actions, text=value, variable=self.centro_logo_var, value=value,
+                radiobutton_width=15, radiobutton_height=15, fg_color=BLUE,
+                text_color=NAVY, font=ctk.CTkFont(size=11),
+            ).pack(side="left", padx=(0, 10))
+        self._button(logo_actions, "Comprimir", self.comprimir_logopedia, kind="soft", width=87, height=30).pack(side="right")
+
+        self.form_note = self._label(form, "Vista previa en modo lectura · PDF sin modificar", size=10, color=MUTED)
+        self.form_note.pack(anchor="w", padx=2, pady=(9, 0))
         self.actualizar_paneles()
-        self._label(form, "Los PDF se visualizan sin modificar su contenido.", wraplength=280, size=10).pack(anchor="w", padx=16, pady=(12, 19))
 
     def actualizar_paneles(self) -> None:
         self.frame_bihotz.pack_forget()
         self.frame_logo.pack_forget()
         if self.tipo.get() == "BIHOTZ":
-            self.frame_bihotz.pack(fill="x", padx=16, pady=(12, 4))
+            self.frame_bihotz.pack(fill="x", padx=2, pady=(11, 0), before=self.form_note)
         else:
-            self.frame_logo.pack(fill="x", padx=16, pady=(12, 4))
+            self.frame_logo.pack(fill="x", padx=2, pady=(11, 0), before=self.form_note)
 
     def _keyboard_shortcuts(self) -> None:
         self.bind_all("<Control-o>", lambda _e: self.seleccionar())
@@ -351,10 +373,59 @@ class App(TkinterDnD.Tk):
             return
         self.canvas.delete("all")
         w, h = max(1, self.canvas.winfo_width()), max(1, self.canvas.winfo_height())
-        self.canvas.create_text(w/2, h/2 - 35, text="▣", fill="#A1B2C9", font=("Segoe UI", 40))
-        self.canvas.create_text(w/2, h/2 + 5, text="Tu documento aparecerá aquí", fill=NAVY, font=("Segoe UI", 15, "bold"))
-        self.canvas.create_text(w/2, h/2 + 30, text="Abre un PDF para navegar por todas sus páginas", fill=MUTED, font=("Segoe UI", 11))
-        self.canvas.configure(scrollregion=(0, 0, w, h))
+        if w < 90 or h < 90:
+            return
+        pad_x, pad_y = max(22, w * 0.085), max(24, h * 0.11)
+        self.canvas.create_rectangle(
+            pad_x, pad_y, w - pad_x, h - pad_y,
+            outline="#B7CBE9", width=2, dash=(7, 6), fill="#F4F8FF", tags="empty",
+        )
+        self.canvas.create_text(w/2, h/2 - 52, text="▧", fill=BLUE, font=("Segoe UI", 43))
+        self.canvas.create_text(w/2, h/2 - 3, text="ARRASTRA AQUÍ TU PDF", fill=NAVY, font=("Segoe UI", 16, "bold"))
+        self.canvas.create_text(w/2, h/2 + 27, text="O haz clic en esta zona para abrir un documento", fill=MUTED, font=("Segoe UI", 12))
+        self.canvas.create_text(w/2, h/2 + 52, text="También puedes utilizar + Abrir PDF o Ctrl+O", fill=MUTED, font=("Segoe UI", 10))
+        self.canvas.configure(scrollregion=(0, 0, w, h), cursor="hand2")
+
+    def _on_viewer_click(self, _event) -> None:
+        if not self.pdf.is_open:
+            self.seleccionar()
+
+    def _drag_enter(self, _event):
+        self.canvas.configure(bg="#DAE8FF")
+        self._status("Suelta aquí un archivo PDF para abrirlo en el visor")
+        return "copy"
+
+    def _drag_leave(self, _event):
+        self.canvas.configure(bg=CANVAS_BG)
+        if self.pdf.is_open:
+            self._status("Visor preparado · Arrastra otro PDF para abrirlo")
+        else:
+            self._status("Preparado · Arrastra un PDF al visor")
+        return "copy"
+
+    def _toggle_thumbnails(self) -> None:
+        if not self.pdf.is_open or self.pdf.page_count <= 1:
+            return
+        self._thumbnails_visible = not self._thumbnails_visible
+        if self._thumbnails_visible:
+            self.thumb_ribbon.grid()
+            self.btn_thumbs.configure(text="▦  Ocultar miniaturas")
+            self._refresh_thumbnails()
+        else:
+            self.thumb_ribbon.grid_remove()
+            self.btn_thumbs.configure(text="▦  Ver miniaturas")
+            self._thumb_photos.clear()
+        self._on_canvas_resized()
+
+    def _update_thumbnail_control(self) -> None:
+        if self.pdf.is_open and self.pdf.page_count > 1:
+            self.btn_thumbs.grid()
+        else:
+            self._thumbnails_visible = False
+            self.thumb_ribbon.grid_remove()
+            self.btn_thumbs.grid_remove()
+            self.btn_thumbs.configure(text="▦  Ver miniaturas")
+            self._thumb_photos.clear()
 
     def seleccionar(self) -> None:
         path = filedialog.askopenfilename(title="Seleccionar PDF", filetypes=[("Archivos PDF", "*.pdf")])
@@ -362,6 +433,7 @@ class App(TkinterDnD.Tk):
             self.cargar_nuevo_pdf(path)
 
     def al_soltar(self, event) -> None:
+        self.canvas.configure(bg=CANVAS_BG)
         try:
             paths = self.tk.splitlist(event.data)
             pdf_paths = [p for p in paths if Path(p).suffix.lower() == ".pdf"]
@@ -369,8 +441,10 @@ class App(TkinterDnD.Tk):
                 messagebox.showwarning("Archivo no válido", "Arrastra un único archivo PDF.")
                 return
             self.cargar_nuevo_pdf(pdf_paths[0])
+            return "copy"
         except Exception as exc:
             messagebox.showerror("No se pudo importar", str(exc))
+            return "refuse_drop"
 
     def cargar_nuevo_pdf(self, filepath: str) -> None:
         try:
@@ -386,7 +460,9 @@ class App(TkinterDnD.Tk):
         self.search_result_var.set("Buscar en el PDF")
         self.nom.set(""); self.ape.set(""); self.cic.set("")
         self.pdf_path.set(filepath)
-        self.path_label.configure(text=f"PDF: {Path(filepath).name}")
+        filename = Path(filepath).name
+        display_name = filename if len(filename) <= 39 else filename[:35] + "…" + Path(filepath).suffix
+        self.path_label.configure(text=f"PDF · {display_name}")
         self.carpeta_generada = None
         self.archivo_firmado_path = None
         self.btn_abrir.configure(state="disabled")
@@ -396,7 +472,9 @@ class App(TkinterDnD.Tk):
         self.thumb_batch = 0
         self.fit_mode = "page"
         self._update_navigation()
-        self._refresh_thumbnails()
+        self._update_thumbnail_control()
+        if self._thumbnails_visible:
+            self._refresh_thumbnails()
         self.after(70, self.ajustar_documento)
         self._status(f"Documento cargado: {Path(filepath).name} · {self.pdf.page_count} página(s)")
 
@@ -434,8 +512,9 @@ class App(TkinterDnD.Tk):
         batch = index // THUMBS_PER_BATCH
         if batch != self.thumb_batch:
             self.thumb_batch = batch
-            self._refresh_thumbnails()
-        else:
+            if self._thumbnails_visible:
+                self._refresh_thumbnails()
+        elif self._thumbnails_visible:
             self._highlight_selected_thumb()
         if self.fit_mode == "width":
             self.ajustar_ancho()
@@ -448,33 +527,34 @@ class App(TkinterDnD.Tk):
         for child in self.thumb_scroll.winfo_children():
             child.destroy()
         self._thumb_photos.clear()
-        if not self.pdf.is_open:
+        self._thumb_items = []
+        if not self.pdf.is_open or not self._thumbnails_visible:
             self.thumb_batch_label.configure(text="0 / 0")
             return
         begin = self.thumb_batch * THUMBS_PER_BATCH
         end = min(begin + THUMBS_PER_BATCH, self.pdf.page_count)
         total = (self.pdf.page_count + THUMBS_PER_BATCH - 1) // THUMBS_PER_BATCH
         self.thumb_batch_label.configure(text=f"{self.thumb_batch+1} / {total}")
-        self._thumb_items: list[tuple[int, ctk.CTkFrame]] = []
         for index in range(begin, end):
             selected = index == self.page_index
             tile = ctk.CTkFrame(
-                self.thumb_scroll, corner_radius=9, border_width=1,
+                self.thumb_scroll, width=90, height=114, corner_radius=8, border_width=1,
                 border_color=BLUE if selected else BORDER,
                 fg_color=BLUE_PALE if selected else WHITE,
             )
-            tile.pack(fill="x", padx=4, pady=5)
+            tile.pack(side="left", padx=4, pady=2)
+            tile.pack_propagate(False)
             try:
-                thumbnail = self.pdf.thumbnail(index, 105, 139)
+                thumbnail = self.pdf.thumbnail(index, 64, 82)
                 photo = ImageTk.PhotoImage(thumbnail, master=self)
                 self._thumb_photos.append(photo)
                 preview = tk.Label(tile, image=photo, borderwidth=0, bg=WHITE, cursor="hand2")
-                preview.pack(padx=6, pady=(7, 1))
+                preview.pack(padx=5, pady=(4, 0))
                 preview.bind("<Button-1>", lambda _e, n=index: self._set_page(n))
             except PDFViewerError:
-                self._label(tile, "Vista no disponible", size=9).pack(padx=4, pady=9)
-            caption = self._label(tile, f"Página {index+1}", size=10, color=NAVY if selected else MUTED)
-            caption.pack(pady=(1, 6))
+                self._label(tile, "Sin vista", size=9).pack(padx=4, pady=8)
+            caption = self._label(tile, f"Pág. {index+1}", size=10, color=NAVY if selected else MUTED)
+            caption.pack(pady=(1, 4))
             caption.bind("<Button-1>", lambda _e, n=index: self._set_page(n))
             tile.bind("<Button-1>", lambda _e, n=index: self._set_page(n))
             self._thumb_items.append((index, tile))
@@ -553,6 +633,7 @@ class App(TkinterDnD.Tk):
                 for match in self._matches if match.page == self.page_index
             ]
             image = self.pdf.render(self.page_index, self.zoom, self.view_rotation, highlights)
+            self.canvas.configure(cursor="arrow")
             self._canvas_photo = ImageTk.PhotoImage(image, master=self)
             width = max(self.canvas.winfo_width(), image.width + 45)
             height = max(self.canvas.winfo_height(), image.height + 45)
