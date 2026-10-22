@@ -1,4 +1,4 @@
-"""Gestor PDF 2.1 · Visor central de arrastrar y soltar, miniaturas opcionales.
+"""Gestor PDF 2.4 · Visor avanzado con circuitos BIHOTZ, LOGO y POLICLINICA.
 
 Ninguna función reconoce automáticamente pacientes, CIC, nombres ni apellidos.
 """
@@ -8,9 +8,11 @@ import os
 import re
 import shutil
 import subprocess
+import uuid
 import tkinter as tk
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 from tkinter import filedialog, messagebox, simpledialog
 
 import customtkinter as ctk
@@ -18,6 +20,8 @@ from PIL import ImageTk
 from tkinterdnd2 import DND_FILES, TkinterDnD
 
 from pdf_core import Match, PDFDocument, PDFViewerError
+from document_routes import expediente_directory, find_matching_downloads, get_route, original_filename
+from bihotz_email import (archive_stamp, folder_snapshot, prepare_outlook_draft, validate_daily_archive, RECIPIENT)
 
 
 # Identidad visual (modo claro, diseñado para pantallas de oficina).
@@ -46,7 +50,7 @@ ctk.set_default_color_theme("blue")
 class App(TkinterDnD.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("Gestor documental | BIHOTZ · LOGOPEDIA")
+        self.title("Gestor documental | BIHOTZ · LOGOPEDIA · POLICLINICA")
         # Ajustar tamaño inicial a la pantalla sin introducir scroll en el panel lateral.
         width = min(1440, max(1090, self.winfo_screenwidth() - 80))
         height = min(875, max(690, self.winfo_screenheight() - 90))
@@ -85,6 +89,11 @@ class App(TkinterDnD.Tk):
         self.doc_info_var = tk.StringVar(value="Sin documento abierto")
         self.carpeta_generada: Path | None = None
         self.archivo_firmado_path: Path | None = None
+        self._saved_context: tuple[str, ...] | None = None
+        self._last_doc_type = self.tipo.get()
+        self._bihotz_ready_archive: Path | None = None
+        self._bihotz_snapshot: tuple[tuple[str, int, int], ...] | None = None
+        self._bihotz_archive_stamp: tuple[int, int] | None = None
 
         self._create_layout()
         self._keyboard_shortcuts()
@@ -134,8 +143,8 @@ class App(TkinterDnD.Tk):
         name_area = ctk.CTkFrame(header, fg_color="transparent")
         name_area.grid(row=0, column=1, sticky="w")
         self._label(name_area, "GESTOR DOCUMENTAL", size=19, color=NAVY, bold=True).pack(anchor="w")
-        self._label(name_area, "BIHOTZ  /  LOGOPEDIA", size=11, color=MUTED).pack(anchor="w")
-        self._label(header, "VISOR PDF · v2.1", size=11, color=MUTED, bold=True).grid(row=0, column=2, padx=16)
+        self._label(name_area, "BIHOTZ  /  LOGOPEDIA  /  POLICLINICA", size=11, color=MUTED).pack(anchor="w")
+        self._label(header, "VISOR PDF · v2.4", size=11, color=MUTED, bold=True).grid(row=0, column=2, padx=16)
         self._button(header, "+ Abrir PDF", self.seleccionar, kind="primary", width=132, height=38).grid(row=0, column=3, padx=(2, 24))
 
         main = ctk.CTkFrame(self, fg_color="transparent")
@@ -297,7 +306,7 @@ class App(TkinterDnD.Tk):
         # Preferencias compactas, con la misma lógica de negocio que la versión anterior.
         self._label(form, "TIPO DOCUMENTAL", size=10, color=NAVY, bold=True).pack(anchor="w", padx=2, pady=(11, 4))
         ctk.CTkSegmentedButton(
-            form, values=["BIHOTZ", "LOGO"], variable=self.tipo,
+            form, values=["BIHOTZ", "LOGO", "POLICLINICA"], variable=self.tipo,
             command=lambda _value: self.actualizar_paneles(),
             height=31, corner_radius=8, selected_color=BLUE, selected_hover_color=BLUE_HOVER,
             unselected_color="#EAF0F8", unselected_hover_color="#DFE9F5",
@@ -332,10 +341,12 @@ class App(TkinterDnD.Tk):
         self._label(self.frame_bihotz, "GESTIÓN DIARIA · BIHOTZ", size=10, bold=True, color=NAVY).pack(anchor="w", padx=9, pady=(7, 4))
         day_actions = ctk.CTkFrame(self.frame_bihotz, fg_color="transparent")
         day_actions.pack(fill="x", padx=8, pady=(0, 8))
-        day_actions.grid_columnconfigure((0, 1, 2), weight=1, uniform="days")
-        self._button(day_actions, "Crear día", self.crear_carpeta_dia, kind="plain", width=74, height=30).grid(row=0, column=0, sticky="ew", padx=(0, 3))
-        self._button(day_actions, "Abrir día", self.abrir_carpeta_dia, kind="plain", width=74, height=30).grid(row=0, column=1, sticky="ew", padx=3)
-        self._button(day_actions, "Comprimir", self.comprimir_dia, kind="soft", width=74, height=30).grid(row=0, column=2, sticky="ew", padx=(3, 0))
+        day_actions.grid_columnconfigure((0, 1, 2, 3), weight=1, uniform="days")
+        self._button(day_actions, "Crear día", self.crear_carpeta_dia, kind="plain", width=63, height=30).grid(row=0, column=0, sticky="ew", padx=(0, 3))
+        self._button(day_actions, "Abrir día", self.abrir_carpeta_dia, kind="plain", width=63, height=30).grid(row=0, column=1, sticky="ew", padx=3)
+        self._button(day_actions, "Comprimir", self.comprimir_dia, kind="soft", width=69, height=30).grid(row=0, column=2, sticky="ew", padx=3)
+        self.btn_enviar_bihotz = self._button(day_actions, "ENVIAR", self.enviar_bihotz, kind="green", width=65, height=30, state="disabled")
+        self.btn_enviar_bihotz.grid(row=0, column=3, sticky="ew", padx=(3, 0))
 
         self.frame_logo = ctk.CTkFrame(form, fg_color="#F7F9FD", corner_radius=10)
         self._label(self.frame_logo, "LOGOPEDIA · CENTRO", size=10, color=NAVY, bold=True).pack(anchor="w", padx=9, pady=(7, 4))
@@ -349,17 +360,33 @@ class App(TkinterDnD.Tk):
             ).pack(side="left", padx=(0, 10))
         self._button(logo_actions, "Comprimir", self.comprimir_logopedia, kind="soft", width=87, height=30).pack(side="right")
 
+        self.frame_poli = ctk.CTkFrame(form, fg_color="#F7F9FD", corner_radius=10)
+        self._label(self.frame_poli, "POLICLINICA · DOCUMENTO FIRMADO", size=10, color=NAVY, bold=True).pack(anchor="w", padx=9, pady=(7, 4))
+        poli_actions = ctk.CTkFrame(self.frame_poli, fg_color="transparent")
+        poli_actions.pack(fill="x", padx=8, pady=(0, 8))
+        self._button(poli_actions, "Configurar clave", self.configurar_clave_poli, kind="plain", width=125, height=30).pack(side="left")
+        self._button(poli_actions, "Comprimir", self.comprimir_policlinica, kind="soft", width=92, height=30).pack(side="right")
+
         self.form_note = self._label(form, "Vista previa en modo lectura · PDF sin modificar", size=10, color=MUTED)
         self.form_note.pack(anchor="w", padx=2, pady=(9, 0))
         self.actualizar_paneles()
 
     def actualizar_paneles(self) -> None:
+        # Nunca reutilizar una carpeta de otro circuito al cambiar la selección.
+        if self.tipo.get() != self._last_doc_type:
+            self.carpeta_generada = None
+            self.archivo_firmado_path = None
+            self._saved_context = None
+            self.btn_abrir.configure(state="disabled")
+            self.btn_firmado.configure(state="disabled")
+            self._last_doc_type = self.tipo.get()
+            self._status("Tipo documental cambiado · Guarda de nuevo el documento")
         self.frame_bihotz.pack_forget()
         self.frame_logo.pack_forget()
-        if self.tipo.get() == "BIHOTZ":
-            self.frame_bihotz.pack(fill="x", padx=2, pady=(11, 0), before=self.form_note)
-        else:
-            self.frame_logo.pack(fill="x", padx=2, pady=(11, 0), before=self.form_note)
+        self.frame_poli.pack_forget()
+        selected = self.tipo.get()
+        panel = self.frame_bihotz if selected == "BIHOTZ" else self.frame_logo if selected == "LOGO" else self.frame_poli
+        panel.pack(fill="x", padx=2, pady=(11, 0), before=self.form_note)
 
     def _keyboard_shortcuts(self) -> None:
         self.bind_all("<Control-o>", lambda _e: self.seleccionar())
@@ -465,6 +492,7 @@ class App(TkinterDnD.Tk):
         self.path_label.configure(text=f"PDF · {display_name}")
         self.carpeta_generada = None
         self.archivo_firmado_path = None
+        self._saved_context = None
         self.btn_abrir.configure(state="disabled")
         self.btn_firmado.configure(state="disabled")
         self.page_index = 0
@@ -774,12 +802,12 @@ class App(TkinterDnD.Tk):
     def _status(self, text: str) -> None:
         self.status_var.set(text)
 
-    def _base_dir(self) -> Path:
-        if self.destino_var.get() == "ESCRITORIO":
-            desktop = Path.home() / "Desktop"
-            return desktop if desktop.exists() else Path.home() / "Escritorio"
-        folder = "BIHOTZ" if self.tipo.get() == "BIHOTZ" else "LOGOPEDIA"
-        return BASE_ROOT / str(datetime.now().year) / folder
+    def _expediente_dir(self) -> Path:
+        # Mismo formato en los tres circuitos y destinos: APELLIDOS, NOMBRE.
+        return expediente_directory(
+            self.tipo.get(), self.destino_var.get(), BASE_ROOT, Path.home(), datetime.now().year,
+            self.ape.get(), self.nom.get(),
+        )
 
     def _day_dir(self) -> Path:
         today = datetime.now().strftime("%d-%m-%Y")
@@ -809,13 +837,15 @@ class App(TkinterDnD.Tk):
         if not all(self._safe_segment(v.get()) for v in (self.nom, self.ape, self.cic)):
             messagebox.showwarning("Datos incompletos", "Introduce nombre, apellidos y CIC. Evita caracteres no válidos para nombres de archivo.")
             return
-        folder = self._base_dir() / f"{self.ape.get().strip()},{self.nom.get().strip()}"
-        target = folder / f"{self.tipo.get()} CIC {self.cic.get().strip()}.pdf"
+        folder = self._expediente_dir()
+        target = folder / original_filename(self.tipo.get(), self.cic.get())
         try:
             if not self._copy_with_confirmation(Path(self.pdf_path.get()), target):
                 self._status("Guardado cancelado; el documento existente no se ha modificado")
                 return
             self.carpeta_generada = folder
+            self.archivo_firmado_path = None
+            self._saved_context = self._current_context()
             self.btn_abrir.configure(state="normal")
             self.btn_firmado.configure(state="normal")
             self._status(f"Documento guardado correctamente · {target.name}")
@@ -830,17 +860,23 @@ class App(TkinterDnD.Tk):
     def _downloads(self) -> Path:
         return Path.home() / "Downloads"
 
+    def _current_context(self) -> tuple[str, ...]:
+        return (self.tipo.get(), self.cic.get().strip(), self.nom.get().strip(),
+                self.ape.get().strip(), self.destino_var.get())
+
+    def _folder_belongs_to_current_document(self) -> bool:
+        if (self._saved_context is None or self._saved_context != self._current_context()
+                or not self.carpeta_generada or not self.carpeta_generada.is_dir()):
+            messagebox.showwarning("Expediente", "Los datos o el destino han cambiado. Guarda primero el documento para continuar.")
+            return False
+        return True
+
     def _found_files(self) -> list[Path]:
-        # Preserva la búsqueda manual por nombre del flujo original.
-        path = self._downloads()
-        if not path.is_dir():
-            raise FileNotFoundError(f"No se encuentra la carpeta de Descargas: {path}")
-        pattern = f"{self.tipo.get()} CIC {self.cic.get().strip()}".casefold()
-        return [f for f in path.iterdir() if f.is_file() and pattern in f.name.casefold()]
+        # Búsqueda únicamente por nombre y CIC introducido manualmente.
+        return find_matching_downloads(self._downloads(), self.tipo.get(), self.cic.get())
 
     def firmado_descargas(self) -> None:
-        if not self.carpeta_generada or not self.carpeta_generada.is_dir():
-            messagebox.showwarning("Expediente", "Primero guarda el documento en su carpeta.")
+        if not self._folder_belongs_to_current_document():
             return
         try:
             files = self._found_files()
@@ -854,10 +890,11 @@ class App(TkinterDnD.Tk):
                 target = self.carpeta_generada / path.name
                 if not self._copy_with_confirmation(path, target):
                     continue
-                if self.tipo.get() == "BIHOTZ":
+                if get_route(self.tipo.get()).copies_to_day:
                     day_target = self._day_dir() / path.name
                     if not self._copy_with_confirmation(path, day_target):
                         continue
+                    self._invalidate_bihotz_archive()
                 self.archivo_firmado_path = target
                 successes += 1
             self._status(f"Archivos firmados importados: {successes}")
@@ -905,45 +942,190 @@ class App(TkinterDnD.Tk):
                 return path
         return None
 
-    def _compress(self, source: Path, archive: Path, title: str) -> None:
+    def _invalidate_bihotz_archive(self) -> None:
+        self._bihotz_ready_archive = None
+        self._bihotz_snapshot = None
+        self._bihotz_archive_stamp = None
+        self.btn_enviar_bihotz.configure(state="disabled")
+
+    def _compress(self, source: Path, archive: Path, title: str,
+                  password_provider: Callable[[], str | None] | None = None,
+                  *, replace_archive: bool = False) -> bool:
         exe = self._find_7zip()
         if not exe:
             messagebox.showerror("7-Zip no disponible", "No se encuentra 7-Zip instalado en este equipo.")
-            return
-        # Las claves no deben guardarse en el repositorio, el EXE ni los mensajes de error.
-        password = simpledialog.askstring("Contraseña del archivo", f"Introduce la contraseña autorizada para {title}:", show="*", parent=self)
+            return False
+        # Nunca guardar contraseñas en GitHub, el ejecutable ni el registro de errores.
+        password = (password_provider() if password_provider else simpledialog.askstring(
+            "Contraseña del archivo", f"Introduce la contraseña autorizada para {title}:", show="*", parent=self,
+        ))
         if password is None:
-            return
+            return False
         if not password:
             messagebox.showwarning("Falta la contraseña", "No se ha creado el archivo comprimido.")
-            return
-        if archive.exists() and not messagebox.askyesno("El comprimido ya existe", f"¿Quieres actualizar el archivo existente?\n{archive.name}"):
-            return
+            return False
+        if archive.exists() and not messagebox.askyesno(
+            "El comprimido ya existe", f"¿Quieres reemplazar el archivo existente?\n{archive.name}",
+        ):
+            return False
+        # Para el día BIHOTZ generar un 7z nuevo en la misma unidad evita conservar
+        # archivos antiguos que 7-Zip 'a' dejaría dentro del comprimido previo.
+        temporary = archive.with_name(f".{archive.stem}-{uuid.uuid4().hex}.7z") if replace_archive else None
+        output = temporary or archive
         try:
             result = subprocess.run(
-                [str(exe), "a", "-t7z", f"-p{password}", "-mhe=on", str(archive), str(source)],
+                [str(exe), "a", "-t7z", f"-p{password}", "-mhe=on", str(output), str(source)],
                 capture_output=True, text=True, timeout=180,
             )
             if result.returncode != 0:
-                # Evitar mostrar stdout/stderr: algunas herramientas incluyen los argumentos.
                 raise RuntimeError("La compresión no terminó correctamente. Comprueba el archivo y la ruta de destino.")
+            if temporary is not None:
+                # No sustituir un comprimido válido por otro incompleto o corrupto.
+                archive_stamp(temporary)
+                integrity = subprocess.run(
+                    [str(exe), "t", f"-p{password}", str(temporary)],
+                    capture_output=True, text=True, timeout=180,
+                )
+                if integrity.returncode != 0:
+                    raise RuntimeError("7-Zip no ha podido verificar el archivo nuevo; se conserva el comprimido anterior.")
+                os.replace(temporary, archive)
             self._status(f"Archivo comprimido: {archive.name}")
             messagebox.showinfo("Compresión completada", f"Se ha creado el archivo:\n{archive}")
-        except (OSError, subprocess.TimeoutExpired, RuntimeError) as exc:
+            return True
+        except (OSError, subprocess.TimeoutExpired, RuntimeError, ValueError) as exc:
             messagebox.showerror("Compresión", str(exc))
+            return False
+        finally:
+            if temporary is not None:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     def comprimir_dia(self) -> None:
+        self._invalidate_bihotz_archive()
         path = self._day_dir()
         if not path.is_dir():
             messagebox.showwarning("Comprimir día", "Primero crea la carpeta del día.")
             return
-        self._compress(path, path.with_suffix(".7z"), "BIHOTZ")
+        try:
+            before = folder_snapshot(path)
+        except (ValueError, OSError) as exc:
+            messagebox.showwarning("Comprimir día", str(exc))
+            return
+        archive = path.with_suffix(".7z")
+        if not self._compress(path, archive, "BIHOTZ", replace_archive=True):
+            return
+        try:
+            # Rechazar el envío si se añadieron archivos mientras se comprimía.
+            after = folder_snapshot(path)
+            if after != before:
+                messagebox.showwarning("Día modificado", "La carpeta ha cambiado durante la compresión. Repite la operación antes de enviar.")
+                return
+            self._bihotz_snapshot = after
+            self._bihotz_archive_stamp = archive_stamp(archive)
+            self._bihotz_ready_archive = archive
+            self.btn_enviar_bihotz.configure(state="normal")
+            self._status("BIHOTZ del día comprimido · Ya puedes preparar el correo con ENVIAR")
+        except (ValueError, OSError) as exc:
+            messagebox.showerror("Comprimido no verificable", str(exc))
+
+    def enviar_bihotz(self) -> None:
+        if self.tipo.get() != "BIHOTZ":
+            return
+        archive = self._bihotz_ready_archive
+        if archive is None or self._bihotz_snapshot is None or self._bihotz_archive_stamp is None:
+            messagebox.showwarning("ENVIAR", "Primero comprime la carpeta del día de BIHOTZ.")
+            return
+        try:
+            # Fecha comprobada al pulsar ENVIAR, no al abrir el programa.
+            today = datetime.now().date()
+            validate_daily_archive(
+                self._day_dir(), archive, today,
+                self._bihotz_snapshot, self._bihotz_archive_stamp,
+            )
+            if not messagebox.askyesno(
+                "Preparar correo BIHOTZ",
+                f"Se abrirá un borrador en Outlook clásico.\n\n"
+                f"Para: {RECIPIENT}\n"
+                f"Asunto: Volantes {today.strftime('%d-%m-%Y')}\n"
+                f"Adjunto: {archive.name}\n\n"
+                "Revisa el destinatario, el adjunto y la cuenta de envío antes de pulsar Enviar en Outlook.\n\n"
+                "¿Deseas preparar este correo?",
+            ):
+                return
+            prepare_outlook_draft(archive, today)
+            self._status("Borrador BIHOTZ preparado en Outlook · Pendiente de enviar manualmente")
+            messagebox.showinfo(
+                "Correo preparado",
+                "Se ha abierto el correo con el .7z adjunto en Outlook clásico.\n"
+                "Compruébalo y pulsa Enviar desde Outlook.\n"
+                "La aplicación no lo envía automáticamente.",
+            )
+        except (ValueError, OSError, RuntimeError) as exc:
+            if isinstance(exc, ValueError):
+                self._invalidate_bihotz_archive()
+            messagebox.showerror("ENVIAR BIHOTZ", str(exc))
 
     def comprimir_logopedia(self) -> None:
+        if not self._folder_belongs_to_current_document():
+            return
         if not self.archivo_firmado_path or not self.archivo_firmado_path.is_file():
             messagebox.showwarning("Comprimir LOGOPEDIA", "Primero incorpora el archivo firmado desde Descargas.")
             return
         self._compress(self.archivo_firmado_path, self.archivo_firmado_path.with_suffix(".7z"), self.centro_logo_var.get())
+
+    @staticmethod
+    def _keyring():
+        """En Windows, keyring utiliza el almacén de credenciales del usuario."""
+        try:
+            import keyring
+            return keyring
+        except ImportError:
+            return None
+
+    def _poli_password(self, *, force_prompt: bool = False) -> str | None:
+        keyring = self._keyring()
+        service, account = "GestorPDF", "POLICLINICA"
+        if keyring is not None and not force_prompt:
+            try:
+                saved = keyring.get_password(service, account)
+                if saved:
+                    return saved
+            except Exception:
+                # Un fallo de Credential Manager no impide comprimir manualmente.
+                pass
+        password = simpledialog.askstring(
+            "Clave de POLICLINICA",
+            "Introduce la clave autorizada para comprimir documentos de POLICLINICA:",
+            show="*", parent=self,
+        )
+        if not password:
+            return None
+        if keyring is not None:
+            try:
+                keyring.set_password(service, account, password)
+                self._status("Clave de POLICLINICA guardada en las credenciales de Windows")
+            except Exception:
+                messagebox.showwarning("Clave no recordada", "No se ha podido guardar la clave en Windows. Se usará solo en esta operación.")
+        return password
+
+    def configurar_clave_poli(self) -> None:
+        if self._poli_password(force_prompt=True):
+            messagebox.showinfo("POLICLINICA", "Configuración de clave completada. No se ha incluido ninguna contraseña en el programa.")
+
+    def comprimir_policlinica(self) -> None:
+        if not self._folder_belongs_to_current_document():
+            return
+        if not self.archivo_firmado_path or not self.archivo_firmado_path.is_file():
+            messagebox.showwarning("Comprimir POLICLINICA", "Primero incorpora el archivo firmado desde Descargas.")
+            return
+        self._compress(
+            self.archivo_firmado_path,
+            self.archivo_firmado_path.with_suffix(".7z"),
+            "POLICLINICA",
+            password_provider=self._poli_password,
+        )
 
     def _close(self) -> None:
         self._search_token += 1

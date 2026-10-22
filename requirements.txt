@@ -2,3 +2,5 @@ customtkinter>=5.2.2,<6
 tkinterdnd2>=0.4,<1
 PyMuPDF>=1.24,<2
 Pillow>=10,<13
+keyring>=25.6,<27
+pywin32>=306,<312; sys_platform == "win32"
