@@ -1,4 +1,4 @@
-"""Gestor PDF 2.6.4 · Visor avanzado con circuitos BIHOTZ, LOGO y POLICLINICA.
+"""Gestor PDF 2.6.5 · Visor avanzado con circuitos BIHOTZ, LOGO y POLICLINICA.
 
 Ninguna función reconoce automáticamente pacientes, CIC, nombres ni apellidos.
 """
@@ -154,7 +154,7 @@ class App(TkinterDnD.Tk):
         name_area.grid(row=0, column=1, sticky="w")
         self._label(name_area, "GESTOR DOCUMENTAL", size=19, color=NAVY, bold=True).pack(anchor="w")
         self._label(name_area, "BIHOTZ  /  LOGOPEDIA  /  POLICLINICA", size=11, color=MUTED).pack(anchor="w")
-        self._label(header, "VISOR PDF · v2.6.4", size=11, color=MUTED, bold=True).grid(row=0, column=2, padx=16)
+        self._label(header, "VISOR PDF · v2.6.5", size=11, color=MUTED, bold=True).grid(row=0, column=2, padx=16)
         self._button(header, "◷  Historial", self.abrir_historial, kind="plain", width=120, height=38).grid(row=0, column=3, padx=(2, 9))
         self._button(header, "+ Abrir PDF", self.seleccionar, kind="primary", width=132, height=38).grid(row=0, column=4, padx=(2, 24))
 

@@ -41,45 +41,77 @@ def original_filename(tipo: str, cic: str) -> str:
     return f"{document_stem(tipo, cic)}.pdf"
 
 
-def is_matching_download(filename: str, tipo: str, cic: str) -> bool:
-    """Encuentra documentos por su NOMBRE, sin inspeccionar el contenido.
+# Las plataformas de firma pueden anteponer una referencia técnica a los PDF:
+#   16451_BIHOTZ CIC 543210.pdf
+# El bloque identificador relevante es el que TERMINA el nombre, no el que lo inicia.
+# Se conservan variantes habituales de Windows y de firmas (_firmado, -signed, (1)).
+_NAMED_CASE_SUFFIX = re.compile(
+    r"(?:^|[ _.-])(?P<service>BIHOTZ|LOGO|POLI)\s+CIC\s+(?P<cic>\d+)"
+    r"(?:[ _-](?:firmado|firmada|signed))?(?:\s*\(\d+\))?$",
+    re.IGNORECASE,
+)
+_BARE_CIC_FILENAME = re.compile(
+    r"^(?P<cic>\d+)(?:[ _-](?:firmado|firmada|signed))?(?:\s*\(\d+\))?$",
+    re.IGNORECASE,
+)
 
-    Los tres servicios admiten su prefijo propio y también la descarga
-    ``<cic>.pdf``. En BIHOTZ el nombre sin prefijo exige confirmación manual
-    en el selector porque no identifica por sí solo el servicio.
-    En todos los casos el identificador debe ser completo: nunca una subcadena.
+
+def _named_case_at_end(filename: str) -> tuple[str, str] | None:
+    """Extrae (servicio, CIC) del SUFIJO de un nombre de PDF.
+
+    Ignora los números y otros textos antepuestos por la plataforma de firma.
+    No abre ni inspecciona el contenido del documento.
+    """
+    path = Path(filename)
+    if path.suffix.casefold() != ".pdf":
+        return None
+    match = _NAMED_CASE_SUFFIX.search(path.stem)
+    if not match:
+        return None
+    return match.group("service").upper(), match.group("cic")
+
+
+def is_named_service_download(filename: str, tipo: str, cic: str) -> bool:
+    """Comprueba el sufijo `<BIHOTZ|LOGO|POLI> CIC <CIC>` al final del PDF."""
+    route = get_route(tipo)
+    return _named_case_at_end(filename) == (route.filename_prefix, cic.strip())
+
+
+def is_matching_download(filename: str, tipo: str, cic: str) -> bool:
+    """Localiza PDF por su sufijo de servicio/CIC, nunca por números iniciales.
+
+    Ej.: `16451_BIHOTZ CIC 543210.pdf` coincide con BIHOTZ/CIC 543210.
+    Conserva también las descargas previas denominadas `<CIC>.pdf` (sin
+    servicio) y las variantes de firma usuales, para los tres circuitos.
     """
     identifier = cic.strip()
+    route = get_route(tipo)
     if not identifier or Path(filename).suffix.casefold() != ".pdf":
         return False
-    get_route(tipo)  # Validar incluso cuando el archivo no coincide.
-    expected = re.escape(document_stem(tipo, identifier))
-    if re.match(rf"^{expected}(?=\.|[ _(-])", filename, re.IGNORECASE):
-        return True
-    bare_cic = re.escape(identifier)
-    return re.match(rf"^{bare_cic}(?=\.|[ _(-])", filename, re.IGNORECASE) is not None
+    named = _named_case_at_end(filename)
+    if named is not None:
+        return named == (route.filename_prefix, identifier)
+    bare = _BARE_CIC_FILENAME.fullmatch(Path(filename).stem)
+    return bare is not None and bare.group("cic") == identifier
 
 
 def is_foreign_case_filename(filename: str, tipo: str, cic: str) -> bool:
-    """Bloquea una selección manual que identifica a otro CIC o servicio.
+    """Impide incorporar por selección manual un CIC o servicio diferente.
 
-    Los nombres arbitrarios no identificables pueden seleccionarse mediante
-    confirmación explícita. Esta comprobación es solo del nombre de archivo.
+    En los nombres tipo `16451_BIHOTZ CIC 543210.pdf` la referencia 16451
+    NO es el CIC: este debe leerse del sufijo final `BIHOTZ CIC 543210`.
+    Los nombres no identificables siguen requiriendo confirmación manual.
     """
+    route = get_route(tipo)
     if Path(filename).suffix.casefold() != ".pdf":
         return False
-    known = re.match(
-        r"^(?:(BIHOTZ|LOGO|POLI)\s+CIC\s+)?(\d+)(?=\.|[ _(-])",
-        filename, re.IGNORECASE,
-    )
-    if not known:
-        return False
-    prefix, identifier = known.group(1), known.group(2)
-    if identifier != cic.strip():
-        return True
-    if prefix is None:
-        return False
-    return prefix.upper() != get_route(tipo).filename_prefix
+    named = _named_case_at_end(filename)
+    if named is not None:
+        return named != (route.filename_prefix, cic.strip())
+    bare = _BARE_CIC_FILENAME.fullmatch(Path(filename).stem)
+    if bare is not None:
+        return bare.group("cic") != cic.strip()
+    return False
 
 
 def signed_import_filename(filename: str, tipo: str, cic: str) -> str:

@@ -12,7 +12,7 @@ import tkinter as tk
 
 import customtkinter as ctk
 
-from document_routes import is_foreign_case_filename, is_matching_download, document_stem
+from document_routes import is_foreign_case_filename, is_matching_download, is_named_service_download
 
 
 def _choose_downloads(
@@ -129,7 +129,7 @@ def _choose_downloads(
                 parent=window,
             ))
         # BIHOTZ también admite '<CIC>.pdf', pero ese formato no identifica el servicio.
-        if tipo == "BIHOTZ" and not path.name.casefold().startswith(document_stem(tipo, cic).casefold()):
+        if tipo == "BIHOTZ" and not is_named_service_download(path.name, tipo, cic):
             return bool(messagebox.askyesno(
                 "Confirmar documento BIHOTZ",
                 f"El archivo «{path.name}» coincide con el CIC, pero no incluye BIHOTZ en el nombre.\n\n"
