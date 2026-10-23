@@ -42,15 +42,58 @@ def original_filename(tipo: str, cic: str) -> str:
 
 
 def is_matching_download(filename: str, tipo: str, cic: str) -> bool:
-    """Coincidencia del CIC completo, no por mera subcadena numérica.
+    """Encuentra documentos por su NOMBRE, sin inspeccionar el contenido.
 
-    Admite sufijos habituales antes de '.pdf', como '_firmado', ' (1)' y '-signed'.
-    No considera descargas incompletas ni archivos ajenos al formato PDF.
+    BIHOTZ conserva la nomenclatura ``BIHOTZ CIC <cic>``.
+    LOGOPEDIA y POLICLINICA aceptan tanto la nomenclatura del expediente
+    (``LOGO/POLI CIC <cic>``) como el nombre de descarga ``<cic>.pdf``.
+    En todos los casos el identificador debe ser completo: nunca una subcadena.
     """
-    if not cic.strip() or Path(filename).suffix.casefold() != ".pdf":
+    identifier = cic.strip()
+    if not identifier or Path(filename).suffix.casefold() != ".pdf":
         return False
-    expected = re.escape(document_stem(tipo, cic))
-    return re.match(rf"^{expected}(?=\.|[ _(-])", filename, re.IGNORECASE) is not None
+    get_route(tipo)  # Validar incluso cuando el archivo no coincide.
+    expected = re.escape(document_stem(tipo, identifier))
+    if re.match(rf"^{expected}(?=\.|[ _(-])", filename, re.IGNORECASE):
+        return True
+    if tipo in ("LOGO", "POLICLINICA"):
+        bare_cic = re.escape(identifier)
+        return re.match(rf"^{bare_cic}(?=\.|[ _(-])", filename, re.IGNORECASE) is not None
+    return False
+
+
+def is_foreign_case_filename(filename: str, tipo: str, cic: str) -> bool:
+    """Bloquea una selección manual que identifica a otro CIC o servicio.
+
+    Los nombres arbitrarios no identificables pueden seleccionarse mediante
+    confirmación explícita. Esta comprobación es solo del nombre de archivo.
+    """
+    if Path(filename).suffix.casefold() != ".pdf":
+        return False
+    known = re.match(
+        r"^(?:(BIHOTZ|LOGO|POLI)\s+CIC\s+)?(\d+)(?=\.|[ _(-])",
+        filename, re.IGNORECASE,
+    )
+    if not known:
+        return False
+    prefix, identifier = known.group(1), known.group(2)
+    if identifier != cic.strip():
+        return True
+    if prefix is None:
+        return False
+    return prefix.upper() != get_route(tipo).filename_prefix
+
+
+def signed_import_filename(filename: str, tipo: str, cic: str) -> str:
+    """Protege el PDF original cuando un firmado llega con el mismo nombre.
+
+    Para LOGO/POLI, el original ya está archivado como ``LOGO/POLI CIC X.pdf``.
+    Si el PDF firmado se descarga con ese mismo nombre, guardarlo como
+    ``LOGO/POLI CIC X_firmado.pdf`` en lugar de sobrescribir el original.
+    """
+    if tipo in ("LOGO", "POLICLINICA") and filename.casefold() == original_filename(tipo, cic).casefold():
+        return f"{document_stem(tipo, cic)}_firmado.pdf"
+    return filename
 
 
 def find_matching_downloads(folder: Path, tipo: str, cic: str) -> list[Path]:

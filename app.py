@@ -1,10 +1,11 @@
-"""Gestor PDF 2.6.1 · Visor avanzado con circuitos BIHOTZ, LOGO y POLICLINICA.
+"""Gestor PDF 2.6.2 · Visor avanzado con circuitos BIHOTZ, LOGO y POLICLINICA.
 
 Ninguna función reconoce automáticamente pacientes, CIC, nombres ni apellidos.
 """
 from __future__ import annotations
 
 import os
+import filecmp
 import re
 import shutil
 import subprocess
@@ -19,10 +20,11 @@ from PIL import ImageTk
 from tkinterdnd2 import DND_FILES, TkinterDnD
 
 from pdf_core import Match, PDFDocument, PDFViewerError
-from document_routes import expediente_directory, find_matching_downloads, get_route, original_filename
+from document_routes import expediente_directory, find_matching_downloads, get_route, original_filename, signed_import_filename
 from bihotz_email import (archive_stamp, folder_snapshot, prepare_outlook_draft, validate_daily_archive, RECIPIENT)
 from history_store import HistoryStore
 from history_window import HistoryWindow
+from download_picker import choose_download_pdf
 from archive_security import (
     get_service_password, creation_command,
     test_command, list_command,
@@ -152,7 +154,7 @@ class App(TkinterDnD.Tk):
         name_area.grid(row=0, column=1, sticky="w")
         self._label(name_area, "GESTOR DOCUMENTAL", size=19, color=NAVY, bold=True).pack(anchor="w")
         self._label(name_area, "BIHOTZ  /  LOGOPEDIA  /  POLICLINICA", size=11, color=MUTED).pack(anchor="w")
-        self._label(header, "VISOR PDF · v2.6.1", size=11, color=MUTED, bold=True).grid(row=0, column=2, padx=16)
+        self._label(header, "VISOR PDF · v2.6.2", size=11, color=MUTED, bold=True).grid(row=0, column=2, padx=16)
         self._button(header, "◷  Historial", self.abrir_historial, kind="plain", width=120, height=38).grid(row=0, column=3, padx=(2, 9))
         self._button(header, "+ Abrir PDF", self.seleccionar, kind="primary", width=132, height=38).grid(row=0, column=4, padx=(2, 24))
 
@@ -921,9 +923,50 @@ class App(TkinterDnD.Tk):
         # Búsqueda únicamente por nombre y CIC introducido manualmente.
         return find_matching_downloads(self._downloads(), self.tipo.get(), self.cic.get())
 
+    def _select_other_service_download(self, purpose: str) -> Path | None:
+        """LOGO/POLI: escoger exactamente un PDF y no importar todos los candidatos."""
+        try:
+            candidates = self._found_files()
+        except FileNotFoundError:
+            # Si Descargas fue redirigida, el usuario aún puede examinar el PDF.
+            candidates = []
+        return choose_download_pdf(
+            self, candidates, self._downloads(), self.tipo.get(), self.cic.get().strip(),
+            purpose=purpose,
+        )
+
     def firmado_descargas(self) -> None:
         if not self._folder_belongs_to_current_document():
             return
+        if self.tipo.get() != "BIHOTZ":
+            # LOGOPEDIA/POLICLINICA aceptan también descargas llamadas '<CIC>.pdf'.
+            # La elección es individual; evita importar por accidente el PDF original.
+            try:
+                source = self._select_other_service_download("Firmado")
+                if source is None:
+                    return
+                original = self.carpeta_generada / original_filename(self.tipo.get(), self.cic.get())
+                if original.is_file() and filecmp.cmp(source, original, shallow=False):
+                    messagebox.showwarning(
+                        "Documento sin cambios",
+                        "El PDF seleccionado es idéntico al documento original guardado. "
+                        "No se incorporará como firmado. Selecciona el PDF descargado después de firmarlo.",
+                    )
+                    return
+                target = self.carpeta_generada / signed_import_filename(
+                    source.name, self.tipo.get(), self.cic.get(),
+                )
+                if not self._copy_with_confirmation(source, target):
+                    return
+                self.archivo_firmado_path = target
+                self._record_history("Firmado incorporado", self.carpeta_generada, target)
+                self._status(f"Documento incorporado · {target.name}")
+                messagebox.showinfo("Firmado", f"Documento incorporado correctamente:\n{target}")
+            except OSError as exc:
+                messagebox.showerror("Firmado", f"No se ha podido incorporar el PDF:\n{exc}")
+            return
+
+        # BIHOTZ mantiene el flujo de varios documentos y la copia al día.
         try:
             files = self._found_files()
             if not files:
@@ -954,6 +997,23 @@ class App(TkinterDnD.Tk):
         if not self.cic.get().strip():
             messagebox.showwarning("Falta CIC", "Introduce primero el CIC.")
             return
+        if self.tipo.get() != "BIHOTZ":
+            # Para LOGO/POLI, también en Volantes se elige UN PDF explícitamente.
+            try:
+                source = self._select_other_service_download("Volantes")
+                if source is None:
+                    return
+                target = VOLANTES_ROOT / source.name
+                if not self._copy_with_confirmation(source, target):
+                    return
+                self._record_history("Volante archivado", VOLANTES_ROOT, target)
+                self._status("Volante guardado correctamente")
+                messagebox.showinfo("Volantes", f"Documento guardado en:\n{target}")
+            except OSError as exc:
+                messagebox.showerror("Volantes", str(exc))
+            return
+
+        # BIHOTZ conserva la incorporación múltiple de los volantes.
         try:
             files = self._found_files()
             if not files:
