@@ -44,9 +44,9 @@ def original_filename(tipo: str, cic: str) -> str:
 def is_matching_download(filename: str, tipo: str, cic: str) -> bool:
     """Encuentra documentos por su NOMBRE, sin inspeccionar el contenido.
 
-    BIHOTZ conserva la nomenclatura ``BIHOTZ CIC <cic>``.
-    LOGOPEDIA y POLICLINICA aceptan tanto la nomenclatura del expediente
-    (``LOGO/POLI CIC <cic>``) como el nombre de descarga ``<cic>.pdf``.
+    Los tres servicios admiten su prefijo propio y también la descarga
+    ``<cic>.pdf``. En BIHOTZ el nombre sin prefijo exige confirmación manual
+    en el selector porque no identifica por sí solo el servicio.
     En todos los casos el identificador debe ser completo: nunca una subcadena.
     """
     identifier = cic.strip()
@@ -56,10 +56,8 @@ def is_matching_download(filename: str, tipo: str, cic: str) -> bool:
     expected = re.escape(document_stem(tipo, identifier))
     if re.match(rf"^{expected}(?=\.|[ _(-])", filename, re.IGNORECASE):
         return True
-    if tipo in ("LOGO", "POLICLINICA"):
-        bare_cic = re.escape(identifier)
-        return re.match(rf"^{bare_cic}(?=\.|[ _(-])", filename, re.IGNORECASE) is not None
-    return False
+    bare_cic = re.escape(identifier)
+    return re.match(rf"^{bare_cic}(?=\.|[ _(-])", filename, re.IGNORECASE) is not None
 
 
 def is_foreign_case_filename(filename: str, tipo: str, cic: str) -> bool:
@@ -91,7 +89,7 @@ def signed_import_filename(filename: str, tipo: str, cic: str) -> str:
     Si el PDF firmado se descarga con ese mismo nombre, guardarlo como
     ``LOGO/POLI CIC X_firmado.pdf`` en lugar de sobrescribir el original.
     """
-    if tipo in ("LOGO", "POLICLINICA") and filename.casefold() == original_filename(tipo, cic).casefold():
+    if filename.casefold() == original_filename(tipo, cic).casefold():
         return f"{document_stem(tipo, cic)}_firmado.pdf"
     return filename
 
@@ -131,3 +129,27 @@ def expediente_directory(
 ) -> Path:
     """Ruta completa del expediente en unidad T: o Escritorio."""
     return base_directory(tipo, destino, network_root, home, year) / expediente_folder_name(apellidos, nombre)
+
+
+def list_other_download_pdfs(folder: Path, tipo: str, cic: str, *, limit: int = 80) -> list[Path]:
+    """PDF no coincidentes, sin nombres que identifiquen otro circuito/CIC.
+
+    Solo se consultan los nombres y las fechas de modificación, nunca el texto del PDF.
+    El usuario debe confirmar explícitamente cualquier selección no coincidente.
+    """
+    get_route(tipo)
+    if not folder.is_dir():
+        return []
+    other = (
+        item for item in folder.iterdir()
+        if item.is_file()
+        and item.suffix.casefold() == ".pdf"
+        and not is_matching_download(item.name, tipo, cic)
+        and not is_foreign_case_filename(item.name, tipo, cic)
+    )
+    def mtime(item: Path) -> float:
+        try:
+            return item.stat().st_mtime
+        except OSError:
+            return 0.0
+    return sorted(other, key=mtime, reverse=True)[:limit]

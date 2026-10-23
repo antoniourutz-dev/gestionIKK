@@ -1,4 +1,4 @@
-"""Gestor PDF 2.6.2 · Visor avanzado con circuitos BIHOTZ, LOGO y POLICLINICA.
+"""Gestor PDF 2.6.4 · Visor avanzado con circuitos BIHOTZ, LOGO y POLICLINICA.
 
 Ninguna función reconoce automáticamente pacientes, CIC, nombres ni apellidos.
 """
@@ -20,11 +20,11 @@ from PIL import ImageTk
 from tkinterdnd2 import DND_FILES, TkinterDnD
 
 from pdf_core import Match, PDFDocument, PDFViewerError
-from document_routes import expediente_directory, find_matching_downloads, get_route, original_filename, signed_import_filename
+from document_routes import expediente_directory, find_matching_downloads, list_other_download_pdfs, get_route, original_filename, signed_import_filename
 from bihotz_email import (archive_stamp, folder_snapshot, prepare_outlook_draft, validate_daily_archive, RECIPIENT)
 from history_store import HistoryStore
 from history_window import HistoryWindow
-from download_picker import choose_download_pdf
+from download_picker import choose_download_pdf, choose_download_pdfs
 from archive_security import (
     get_service_password, creation_command,
     test_command, list_command,
@@ -154,7 +154,7 @@ class App(TkinterDnD.Tk):
         name_area.grid(row=0, column=1, sticky="w")
         self._label(name_area, "GESTOR DOCUMENTAL", size=19, color=NAVY, bold=True).pack(anchor="w")
         self._label(name_area, "BIHOTZ  /  LOGOPEDIA  /  POLICLINICA", size=11, color=MUTED).pack(anchor="w")
-        self._label(header, "VISOR PDF · v2.6.2", size=11, color=MUTED, bold=True).grid(row=0, column=2, padx=16)
+        self._label(header, "VISOR PDF · v2.6.4", size=11, color=MUTED, bold=True).grid(row=0, column=2, padx=16)
         self._button(header, "◷  Historial", self.abrir_historial, kind="plain", width=120, height=38).grid(row=0, column=3, padx=(2, 9))
         self._button(header, "+ Abrir PDF", self.seleccionar, kind="primary", width=132, height=38).grid(row=0, column=4, padx=(2, 24))
 
@@ -923,16 +923,20 @@ class App(TkinterDnD.Tk):
         # Búsqueda únicamente por nombre y CIC introducido manualmente.
         return find_matching_downloads(self._downloads(), self.tipo.get(), self.cic.get())
 
-    def _select_other_service_download(self, purpose: str) -> Path | None:
-        """LOGO/POLI: escoger exactamente un PDF y no importar todos los candidatos."""
+    def _select_download_pdf(self, purpose: str) -> Path | None:
+        """Selección manual supervisada, incluso sin coincidencias por nombre."""
+        downloads = self._downloads()
+        tipo = self.tipo.get()
+        cic = self.cic.get().strip()
         try:
-            candidates = self._found_files()
+            candidates = find_matching_downloads(downloads, tipo, cic)
+            others = list_other_download_pdfs(downloads, tipo, cic)
         except FileNotFoundError:
-            # Si Descargas fue redirigida, el usuario aún puede examinar el PDF.
-            candidates = []
+            # La selección manual sigue disponible si Descargas está redirigida.
+            candidates, others = [], []
         return choose_download_pdf(
-            self, candidates, self._downloads(), self.tipo.get(), self.cic.get().strip(),
-            purpose=purpose,
+            self, candidates, downloads, tipo, cic,
+            purpose=purpose, other_candidates=others,
         )
 
     def firmado_descargas(self) -> None:
@@ -942,7 +946,7 @@ class App(TkinterDnD.Tk):
             # LOGOPEDIA/POLICLINICA aceptan también descargas llamadas '<CIC>.pdf'.
             # La elección es individual; evita importar por accidente el PDF original.
             try:
-                source = self._select_other_service_download("Firmado")
+                source = self._select_download_pdf("Firmado")
                 if source is None:
                     return
                 original = self.carpeta_generada / original_filename(self.tipo.get(), self.cic.get())
@@ -966,32 +970,65 @@ class App(TkinterDnD.Tk):
                 messagebox.showerror("Firmado", f"No se ha podido incorporar el PDF:\n{exc}")
             return
 
-        # BIHOTZ mantiene el flujo de varios documentos y la copia al día.
+        # BIHOTZ: seleccionar siempre, aunque haya coincidencias. Un PDF con el
+        # prefijo habitual puede ser el original sin firmar; no copiar por nombre
+        # automáticamente ni confundirlo con el firmado.
         try:
-            files = self._found_files()
+            files = self._select_download_pdfs("Firmado")
             if not files:
-                messagebox.showwarning("Firmado", "No se encontró ningún archivo con el nombre indicado en Descargas.")
+                self._status("Firmado BIHOTZ cancelado")
                 return
-            if not messagebox.askyesno("Confirmar documentos", "Se han encontrado estos archivos:\n\n" + "\n".join(f.name for f in files) + "\n\n¿Copiarlos?"):
-                return
+            original = self.carpeta_generada / original_filename("BIHOTZ", self.cic.get())
             successes = 0
+            skipped = 0
             for path in files:
-                target = self.carpeta_generada / path.name
+                # No sustituir el original ni registrar como firmado un PDF idéntico.
+                if original.is_file() and filecmp.cmp(path, original, shallow=False):
+                    messagebox.showwarning(
+                        "Documento sin cambios",
+                        f"El archivo {path.name} es idéntico al PDF original guardado. "
+                        "No se incorporará como firmado.",
+                    )
+                    skipped += 1
+                    continue
+                target_name = signed_import_filename(path.name, "BIHOTZ", self.cic.get())
+                target = self.carpeta_generada / target_name
                 if not self._copy_with_confirmation(path, target):
+                    skipped += 1
                     continue
                 self._record_history("Firmado incorporado", self.carpeta_generada, target)
-                if get_route(self.tipo.get()).copies_to_day:
-                    day_target = self._day_dir() / path.name
-                    if not self._copy_with_confirmation(path, day_target):
-                        continue
-                    self._record_history("Firmado al día", day_target.parent, day_target)
-                    self._invalidate_bihotz_archive()
+                # BIHOTZ requiere además copiar el mismo firmado a la carpeta del día.
+                day_target = self._day_dir() / target_name
+                if not self._copy_with_confirmation(path, day_target):
+                    skipped += 1
+                    continue
+                self._record_history("Firmado al día", day_target.parent, day_target)
+                self._invalidate_bihotz_archive()
                 self.archivo_firmado_path = target
                 successes += 1
-            self._status(f"Archivos firmados importados: {successes}")
-            messagebox.showinfo("Firmado", f"Se han copiado {successes} documento(s).")
-        except (OSError, FileNotFoundError) as exc:
-            messagebox.showerror("Error", str(exc))
+            self._status(f"BIHOTZ · Firmados incorporados: {successes}" + (f" · Pendientes: {skipped}" if skipped else ""))
+            if skipped:
+                messagebox.showwarning("Firmado BIHOTZ",
+                    f"Incorporados en ambas carpetas: {successes}.\n"
+                    f"Sin completar: {skipped}. Revisa el aviso anterior y las carpetas.")
+            else:
+                messagebox.showinfo("Firmado BIHOTZ", f"Se han incorporado {successes} firmado(s) al expediente y al día.")
+        except OSError as exc:
+            messagebox.showerror("Firmado BIHOTZ", f"No se ha podido completar la copia:\n{exc}")
+
+    def _select_download_pdfs(self, purpose: str) -> list[Path]:
+        """Selección manual múltiple solo para BIHOTZ (Firmado/Volantes)."""
+        downloads = self._downloads()
+        cic = self.cic.get().strip()
+        try:
+            candidates = find_matching_downloads(downloads, "BIHOTZ", cic)
+            others = list_other_download_pdfs(downloads, "BIHOTZ", cic)
+        except FileNotFoundError:
+            candidates, others = [], []
+        return choose_download_pdfs(
+            self, candidates, downloads, "BIHOTZ", cic,
+            purpose=purpose, other_candidates=others,
+        )
 
     def guardar_volantes(self) -> None:
         if not self.cic.get().strip():
@@ -1000,7 +1037,7 @@ class App(TkinterDnD.Tk):
         if self.tipo.get() != "BIHOTZ":
             # Para LOGO/POLI, también en Volantes se elige UN PDF explícitamente.
             try:
-                source = self._select_other_service_download("Volantes")
+                source = self._select_download_pdf("Volantes")
                 if source is None:
                     return
                 target = VOLANTES_ROOT / source.name
@@ -1013,13 +1050,10 @@ class App(TkinterDnD.Tk):
                 messagebox.showerror("Volantes", str(exc))
             return
 
-        # BIHOTZ conserva la incorporación múltiple de los volantes.
+        # BIHOTZ: permite seleccionar uno o varios volantes y revisar sus nombres.
         try:
-            files = self._found_files()
+            files = self._select_download_pdfs("Volantes")
             if not files:
-                messagebox.showwarning("Volantes", "No se han encontrado documentos coincidentes en Descargas.")
-                return
-            if not messagebox.askyesno("Confirmar volantes", "Archivos encontrados:\n\n" + "\n".join(f.name for f in files) + "\n\n¿Guardarlos en Volantes?"):
                 return
             successes = 0
             for path in files:
@@ -1027,7 +1061,7 @@ class App(TkinterDnD.Tk):
                 if self._copy_with_confirmation(path, target):
                     successes += 1
                     self._record_history("Volante archivado", VOLANTES_ROOT, target)
-            self._status(f"Volantes copiados: {successes}")
+            self._status(f"Volantes BIHOTZ copiados: {successes}")
             messagebox.showinfo("Volantes", f"Se han guardado {successes} documento(s).")
         except OSError as exc:
             messagebox.showerror("Volantes", str(exc))
